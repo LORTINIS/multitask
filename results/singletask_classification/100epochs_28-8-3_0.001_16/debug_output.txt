@@ -1,0 +1,339 @@
+Using device: cuda
+
+================================================================================
+PART 1: LOADING AND PREPROCESSING WINE DATASET
+================================================================================
+Starting data loading from: data/wine
+Processing folder: AQ_Wines...
+Processing folder: HQ_Wines...
+Processing folder: LQ_Wines...
+
+Data loading complete. Total rows loaded: 782550
+
+Dataset shape: (782550, 15)
+
+First few rows:
+  Data_Type Quality_Label   Brand Bottle Repetition  ... MQ-4_R1 (kOhm)  MQ-6_R1 (kOhm)  MQ-3_R2 (kOhm)  MQ-4_R2 (kOhm)  MQ-6_R2 (kOhm)
+0      Wine            AQ  Wine01    B01        R01  ...        59.5215        181.3393        725.8070         61.2164        153.2312
+1      Wine            AQ  Wine01    B01        R01  ...        59.5646        181.3393        727.4505         61.2839        153.2312
+2      Wine            AQ  Wine01    B01        R01  ...        59.5431        181.2181        727.4505         61.3064        153.3213
+3      Wine            AQ  Wine01    B01        R01  ...        59.5862        180.8554        730.7594         61.3290        153.2312
+4      Wine            AQ  Wine01    B01        R01  ...        59.5431        180.9762        727.4505         61.2614        153.4115
+
+[5 rows x 15 columns]
+
+--------------------------------------------------------------------------------
+1.1 Removing Stabilization Period
+--------------------------------------------------------------------------------
+Processing 235 unique files...
+
+Dataset shape after removing stabilization period: (665050, 15)
+
+--------------------------------------------------------------------------------
+1.2 Feature Engineering
+--------------------------------------------------------------------------------
+Aggregating time-series data into features per file...
+
+Aggregated dataset shape: (235, 39)
+Features per sample: 34
+
+--------------------------------------------------------------------------------
+1.3 Preparing Features and Labels
+--------------------------------------------------------------------------------
+
+Number of features: 34
+Feature columns (first 10): ['MQ-3_R1 (kOhm)_mean', 'MQ-3_R1 (kOhm)_std', 'MQ-3_R1 (kOhm)_min', 'MQ-3_R1 (kOhm)_max', 'MQ-3_R1 (kOhm)_median', 'MQ-4_R1 (kOhm)_mean', 'MQ-4_R1 (kOhm)_std', 'MQ-4_R1 (kOhm)_min', 'MQ-4_R1 (kOhm)_max', 'MQ-4_R1 (kOhm)_median']
+
+Label distribution:
+  AQ: 43 samples (encoded as 0)
+  HQ: 51 samples (encoded as 1)
+  LQ: 141 samples (encoded as 2)
+
+Feature matrix shape: (235, 34)
+Label vector shape: (235,)
+
+--------------------------------------------------------------------------------
+1.4 Normalization and Missing Value Handling
+--------------------------------------------------------------------------------
+NaN values: 204
+Inf values: 0
+After cleaning - NaN values: 0, Inf values: 0
+
+Normalized feature range: [0.000, 1.000]
+
+--------------------------------------------------------------------------------
+1.5 Train-Test Split
+--------------------------------------------------------------------------------
+
+Training set size: 188 samples
+Test set size: 47 samples
+
+Training set label distribution:
+  AQ: 34 samples
+  HQ: 41 samples
+  LQ: 113 samples
+
+Test set label distribution:
+  AQ: 9 samples
+  HQ: 10 samples
+  LQ: 28 samples
+
+================================================================================
+PART 2: SPIKE ENCODING WITH LATENCY/TEMPORAL CODING
+================================================================================
+
+LATENCY ENCODING EXPLANATION:
+------------------------------
+Latency encoding (temporal coding) converts continuous values into spike timing:
+
+- HIGHER VALUES → EARLIER SPIKES (shorter latency)
+- LOWER VALUES → LATER SPIKES (longer latency)
+
+This encoding mimics biological neural coding and is suitable for SNNs.
+For normalized values in [0, 1]:
+- Value close to 1.0 → spike occurs at early timestep (e.g., t=1 or t=2)
+- Value close to 0.0 → spike occurs at late timestep (e.g., t=9 or t=10)
+- Value = 0.0 → no spike generated
+
+
+--------------------------------------------------------------------------------
+2.1 Spike Encoding Configuration
+--------------------------------------------------------------------------------
+
+Number of time steps: 25
+This means spikes can occur at any of 25 discrete time points
+
+--------------------------------------------------------------------------------
+2.2 Generating Spike Trains
+--------------------------------------------------------------------------------
+
+Encoding training data:
+  Creating spike trains for 188 samples with 34 features...
+  Spike train shape: torch.Size([25, 188, 34])
+  Format: (time_steps=25, samples=188, features=34)
+  Total spikes generated: 6,330
+  Average spike rate: 0.0396
+
+Encoding test data:
+  Creating spike trains for 47 samples with 34 features...
+  Spike train shape: torch.Size([25, 47, 34])
+  Format: (time_steps=25, samples=47, features=34)
+  Total spikes generated: 1,590
+  Average spike rate: 0.0398
+
+✓ Spike encoding completed successfully!
+
+================================================================================
+PART 3: DESIGNING MULTITASK SNN ARCHITECTURE
+================================================================================
+
+ARCHITECTURE DESIGN (Based on Provided Diagram):
+-------------------------------------------------
+The architecture follows the diagram with modifications for wine classification:
+
+INPUTS:
+- Array #1: Features from MQ sensor array 1 (R1) - statistics from 3 sensors
+- Array #2: Features from MQ sensor array 2 (R2) - statistics from 3 sensors
+- Additional: Environmental features (Temperature, Humidity)
+- Total Input Neurons: 57 (30 from each array + environmental features)
+
+HIDDEN LAYERS:
+- Hidden Layer 1: 28 neurons (LIF neurons) - matches diagram
+- Hidden Layer 2: 8 neurons (LIF neurons) - matches diagram
+
+OUTPUT LAYER:
+- Modified for wine classification: 3 outputs (HQ, LQ, AQ)
+- Original diagram had 4 outputs (Acetonitrile, DCM, Methanol, Toluene)
+
+NEURON MODEL:
+- Leaky Integrate-and-Fire (LIF) neurons
+- Beta parameter: membrane potential decay rate
+- Threshold-based spiking mechanism
+
+
+--------------------------------------------------------------------------------
+3.1 Multitask SNN Model Definition
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+3.2 Model Instantiation
+--------------------------------------------------------------------------------
+
+Model hyperparameters:
+  Input size: 34
+  Hidden layer 1 size: 28 (from diagram)
+  Hidden layer 2 size: 8 (from diagram)
+  Output size: 3 (modified for wine classification)
+  Beta (decay rate): 0.9
+
+Model created and moved to cuda
+
+Model architecture:
+WineQualitySNN(
+  (fc1): Linear(in_features=34, out_features=28, bias=True)
+  (fc2): Linear(in_features=28, out_features=8, bias=True)
+  (fc3): Linear(in_features=8, out_features=3, bias=True)
+  (lif1): Leaky()
+  (lif2): Leaky()
+  (lif3): Leaky()
+)
+
+Total parameters: 1,239
+Trainable parameters: 1,239
+
+================================================================================
+PART 4: TRAINING THE BASELINE SINGLE TASK SNN MODEL
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1 Training Configuration
+--------------------------------------------------------------------------------
+
+Training hyperparameters:
+  Number of epochs: 100
+  Batch size: 16
+  Learning rate: 0.001
+
+Loss function: CrossEntropyLoss
+Optimizer: Adam
+LR Scheduler: ReduceLROnPlateau
+
+--------------------------------------------------------------------------------
+4.2 Creating Data Loaders
+--------------------------------------------------------------------------------
+
+Training batches: 12
+Test batches: 3
+
+--------------------------------------------------------------------------------
+4.3 Training Loop
+--------------------------------------------------------------------------------
+
+Starting training...
+--------------------------------------------------------------------------------
+Epoch [  1/100] | Train Loss: 4.2777 | Test Loss: 4.0135 | Train Acc: 42.02% | Test Acc: 61.70% | F1: 0.5163
+Epoch [ 10/100] | Train Loss: 0.6179 | Test Loss: 0.4020 | Train Acc: 79.79% | Test Acc: 85.11% | F1: 0.8508
+Epoch [ 20/100] | Train Loss: 0.6702 | Test Loss: 0.6108 | Train Acc: 78.72% | Test Acc: 74.47% | F1: 0.7494
+Epoch [ 30/100] | Train Loss: 0.1506 | Test Loss: 0.1384 | Train Acc: 93.62% | Test Acc: 95.74% | F1: 0.9555
+Epoch [ 40/100] | Train Loss: 0.0737 | Test Loss: 0.0514 | Train Acc: 97.87% | Test Acc: 95.74% | F1: 0.9567
+Epoch [ 50/100] | Train Loss: 0.0420 | Test Loss: 0.0396 | Train Acc: 97.87% | Test Acc: 97.87% | F1: 0.9787
+Epoch [ 60/100] | Train Loss: 0.0666 | Test Loss: 0.0357 | Train Acc: 97.34% | Test Acc: 100.00% | F1: 1.0000
+Epoch [ 70/100] | Train Loss: 0.0371 | Test Loss: 0.0409 | Train Acc: 98.40% | Test Acc: 97.87% | F1: 0.9783
+Epoch [ 80/100] | Train Loss: 0.0170 | Test Loss: 0.0858 | Train Acc: 100.00% | Test Acc: 97.87% | F1: 0.9783
+Epoch [ 90/100] | Train Loss: 0.0167 | Test Loss: 0.1137 | Train Acc: 99.47% | Test Acc: 95.74% | F1: 0.9574
+Epoch [100/100] | Train Loss: 0.0183 | Test Loss: 0.1153 | Train Acc: 99.47% | Test Acc: 95.74% | F1: 0.9574
+
+✓ Training completed!
+
+--------------------------------------------------------------------------------
+4.4 Training History Visualization
+--------------------------------------------------------------------------------
+
+✓ Training history plots saved as 'training_history_wine_snn.png'
+
+--------------------------------------------------------------------------------
+4.5 Final Model Evaluation
+--------------------------------------------------------------------------------
+
+================================================================================
+FINAL MODEL PERFORMANCE METRICS
+================================================================================
+
+Accuracy: 95.74%
+F1 Score (weighted): 0.9574
+
+
+Classification Report:
+--------------------------------------------------------------------------------
+              precision    recall  f1-score   support
+
+          AQ       0.89      0.89      0.89         9
+          HQ       1.00      1.00      1.00        10
+          LQ       0.96      0.96      0.96        28
+
+    accuracy                           0.96        47
+   macro avg       0.95      0.95      0.95        47
+weighted avg       0.96      0.96      0.96        47
+
+
+--------------------------------------------------------------------------------
+4.6 Confusion Matrix Visualization
+--------------------------------------------------------------------------------
+
+✓ Confusion matrix saved as 'confusion_matrix_wine_snn.png'
+
+--------------------------------------------------------------------------------
+4.7 Analyzing Spiking Activity in Hidden Layers
+--------------------------------------------------------------------------------
+
+Spike rates:
+  Hidden Layer 1 (28 neurons): 0.1027
+  Hidden Layer 2 (8 neurons): 0.2019
+
+✓ Spiking activity plots saved as 'spiking_activity_wine_snn.png'
+
+================================================================================
+FINAL SUMMARY: MULTITASK SNN FOR WINE QUALITY CLASSIFICATION
+================================================================================
+
+PROJECT COMPLETED SUCCESSFULLY!
+
+1. DATASET ANALYSIS:
+   ✓ Loaded wine dataset from time-series sensor data
+   ✓ Processed 235 unique files
+   ✓ Removed 500 time points (stabilization period)
+   ✓ Created aggregate features from time-series data
+
+2. DATA PREPROCESSING:
+   ✓ Features per sample: 34
+   ✓ Total samples: 235
+   ✓ Train/test split: 188/47 samples
+   ✓ Classes: AQ, HQ, LQ
+
+3. SPIKE ENCODING:
+   ✓ Used latency encoding (temporal coding)
+   ✓ Encoded data into 25 time steps
+   ✓ Higher values → earlier spikes
+   ✓ Total training spikes: 6,330
+
+4. SNN ARCHITECTURE (Based on Diagram):
+   ✓ Input: 34 features
+   ✓ Hidden Layer 1: 28 LIF neurons (from diagram)
+   ✓ Hidden Layer 2: 8 LIF neurons (from diagram)
+   ✓ Output: 3 neurons (modified for wine classification)
+   ✓ Total parameters: 1,239
+
+5. MODEL PERFORMANCE:
+   ✓ Final Accuracy: 95.74%
+   ✓ F1 Score: 0.9574
+   ✓ Trained for 100 epochs
+
+6. KEY DIFFERENCES FROM DIAGRAM:
+   ✓ Input: Modified from sensor arrays to aggregate statistical features
+   ✓ Output: 3 classes (HQ, LQ, AQ) instead of 4 analytes
+   ✓ Task: Classification instead of analyte detection
+   ✓ Architecture layers match diagram (28, 8 neurons)
+
+7. GENERATED VISUALIZATIONS:
+   ✓ training_history_wine_snn.png - Training progress
+   ✓ confusion_matrix_wine_snn.png - Classification performance
+   ✓ spiking_activity_wine_snn.png - Neural spiking patterns
+
+KEY INSIGHTS:
+- Successfully adapted the diagram architecture for wine classification
+- Latency encoding effectively represents aggregate sensor features
+- SNN architecture with 28 and 8 hidden neurons performs well
+- Sparse spiking activity demonstrates energy-efficient computation
+- Model successfully discriminates between wine quality levels
+
+NEXT STEPS:
+- Fine-tune hyperparameters (beta, num_steps, learning rate)
+- Experiment with different aggregation strategies for time-series
+- Try different spike encoding methods (rate coding, delta modulation)
+- Implement true multitask learning with additional outputs
+- Deploy model for real-time wine quality assessment
+
+
+================================================================================
+Implementation complete with architecture matching the provided diagram!
+================================================================================
