@@ -1,0 +1,332 @@
+Using device: cuda
+
+================================================================================
+PART 1: LOADING AND PREPROCESSING ETHANOL CONCENTRATION DATASET
+================================================================================
+Starting data loading from: data/wine
+Processing folder: Ethanol...
+
+Data loading complete. Total rows loaded: 216450
+Unique concentrations: [np.float64(1.0), np.float64(2.5), np.float64(5.0), np.float64(10.0), np.float64(15.0), np.float64(20.0)]
+
+Dataset shape: (216450, 13)
+
+First few rows:
+   Concentration_Value Concentration_Label Repetition       Filename  ...  MQ-6_R1 (kOhm)  MQ-3_R2 (kOhm)  MQ-4_R2 (kOhm)  MQ-6_R2 (kOhm)
+0                  1.0                1.0%        R01  Ea-C1_R01.txt  ...        154.7755        760.1101         51.8723        131.8809
+1                  1.0                1.0%        R01  Ea-C1_R01.txt  ...        154.8672        760.1101         51.9248        131.8809
+2                  1.0                1.0%        R01  Ea-C1_R01.txt  ...        154.7755        761.9080         51.9248        131.8115
+3                  1.0                1.0%        R01  Ea-C1_R01.txt  ...        154.7755        761.9080         51.9073        131.8809  
+4                  1.0                1.0%        R01  Ea-C1_R01.txt  ...        154.5924        761.9080         51.9423        131.8115  
+
+[5 rows x 13 columns]
+
+--------------------------------------------------------------------------------
+1.1 Removing Stabilization Period
+--------------------------------------------------------------------------------
+Processing 65 unique files...
+
+Dataset shape after removing stabilization period: (183950, 13)
+
+--------------------------------------------------------------------------------
+1.2 Feature Engineering
+--------------------------------------------------------------------------------
+Aggregating time-series data into features per file...
+
+Aggregated dataset shape: (65, 38)
+Features per sample: 34
+
+--------------------------------------------------------------------------------
+1.3 Preparing Features and Labels
+--------------------------------------------------------------------------------
+
+Number of features: 34
+Feature columns (first 10): ['MQ-3_R1 (kOhm)_mean', 'MQ-3_R1 (kOhm)_std', 'MQ-3_R1 (kOhm)_min', 'MQ-3_R1 (kOhm)_max', 'MQ-3_R1 (kOhm)_median', 'MQ-4_R1 (kOhm)_mean', 'MQ-4_R1 (kOhm)_std', 'MQ-4_R1 (kOhm)_min', 'MQ-4_R1 (kOhm)_max', 'MQ-4_R1 (kOhm)_median']
+
+Concentration distribution:
+  1.0%: 10 samples
+  2.5%: 10 samples
+  5.0%: 11 samples
+  10.0%: 12 samples
+  15.0%: 11 samples
+  20.0%: 11 samples
+
+Feature matrix shape: (65, 34)
+Target vector shape: (65,)
+Concentration range: [1.0%, 20.0%]
+
+--------------------------------------------------------------------------------
+1.4 Normalization and Missing Value Handling
+--------------------------------------------------------------------------------
+NaN values in features: 0
+Inf values in features: 0
+After cleaning - NaN values: 0, Inf values: 0
+
+Normalized feature range: [0.000, 1.000]
+Normalized target range: [0.000, 1.000]
+
+--------------------------------------------------------------------------------
+1.5 Train-Test Split
+--------------------------------------------------------------------------------
+
+Training set size: 52 samples
+Test set size: 13 samples
+
+Training set concentration range: [1.0%, 20.0%]
+Test set concentration range: [1.0%, 20.0%]
+
+================================================================================
+PART 2: SPIKE ENCODING WITH LATENCY/TEMPORAL CODING
+================================================================================
+
+LATENCY ENCODING EXPLANATION:
+------------------------------
+Latency encoding (temporal coding) converts continuous values into spike timing:
+
+- HIGHER VALUES → EARLIER SPIKES (shorter latency)
+- LOWER VALUES → LATER SPIKES (longer latency)
+
+This encoding mimics biological neural coding and is suitable for SNNs.
+For normalized values in [0, 1]:
+- Value close to 1.0 → spike occurs at early timestep (e.g., t=1 or t=2)
+- Value close to 0.0 → spike occurs at late timestep (e.g., t=9 or t=10)
+- Value = 0.0 → no spike generated
+
+
+--------------------------------------------------------------------------------
+2.1 Spike Encoding Configuration
+--------------------------------------------------------------------------------
+
+Number of time steps: 25
+This means spikes can occur at any of 25 discrete time points
+
+--------------------------------------------------------------------------------
+2.2 Generating Spike Trains
+--------------------------------------------------------------------------------
+
+Encoding training data:
+  Creating spike trains for 52 samples with 34 features...
+  Spike train shape: torch.Size([25, 52, 34])
+  Format: (time_steps=25, samples=52, features=34)
+  Total spikes generated: 1,724
+  Average spike rate: 0.0390
+
+Encoding test data:
+  Creating spike trains for 13 samples with 34 features...
+  Spike train shape: torch.Size([25, 13, 34])
+  Format: (time_steps=25, samples=13, features=34)
+  Total spikes generated: 421
+  Average spike rate: 0.0381
+
+✓ Spike encoding completed successfully!
+
+================================================================================
+PART 3: DESIGNING SNN ARCHITECTURE FOR CONCENTRATION REGRESSION
+================================================================================
+
+ARCHITECTURE DESIGN (Based on Provided Diagram):
+-------------------------------------------------
+The architecture follows the diagram for concentration regression:
+
+INPUTS:
+- Array #1: Features from MQ sensor array 1 (R1) - statistics from 3 sensors
+- Array #8: Features from MQ sensor array 2 (R2) - statistics from 3 sensors
+- Analyte on/off: Environmental features (Temperature, Humidity)
+- Total Input Neurons: 57 (aggregate statistics from both arrays + environmental)
+
+HIDDEN LAYERS:
+- Hidden Layer 1: 28 neurons (LIF neurons) - matches diagram
+- Hidden Layer 2: 14 neurons (LIF neurons) - matches diagram
+
+OUTPUT LAYER:
+- Single output for concentration regression (continuous value)
+- Uses membrane potential for prediction
+
+NEURON MODEL:
+- Leaky Integrate-and-Fire (LIF) neurons
+- Beta parameter: membrane potential decay rate
+- Threshold-based spiking mechanism
+
+
+--------------------------------------------------------------------------------
+3.1 SNN Model Definition
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+3.2 Model Instantiation
+--------------------------------------------------------------------------------
+
+Model hyperparameters:
+  Input size: 34
+  Hidden layer 1 size: 28 (from diagram)
+  Hidden layer 2 size: 14 (from diagram)
+  Output size: 1 (concentration regression)
+  Beta (decay rate): 0.9
+
+Model created and moved to cuda
+
+Model architecture:
+ConcentrationRegressionSNN(
+  (fc1): Linear(in_features=34, out_features=28, bias=True)
+  (fc2): Linear(in_features=28, out_features=14, bias=True)
+  (fc3): Linear(in_features=14, out_features=1, bias=True)
+  (lif1): Leaky()
+  (lif2): Leaky()
+  (lif3): Leaky()
+)
+
+Total parameters: 1,401
+Trainable parameters: 1,401
+
+================================================================================
+PART 4: TRAINING THE CONCENTRATION REGRESSION SNN MODEL
+================================================================================
+
+--------------------------------------------------------------------------------
+4.1 Training Configuration
+--------------------------------------------------------------------------------
+
+Training hyperparameters:
+  Number of epochs: 100
+  Batch size: 16
+  Learning rate: 0.001
+
+Loss function: MSELoss
+Optimizer: Adam
+LR Scheduler: ReduceLROnPlateau
+
+--------------------------------------------------------------------------------
+4.2 Creating Data Loaders
+--------------------------------------------------------------------------------
+
+Training batches: 4
+Test batches: 1
+
+--------------------------------------------------------------------------------
+4.3 Training Loop
+--------------------------------------------------------------------------------
+
+Starting training...
+--------------------------------------------------------------------------------
+Epoch [  1/100] | Train Loss: 1.071937 | Test Loss: 1.066825 | Test R²: -5.8892
+Epoch [ 10/100] | Train Loss: 0.220006 | Test Loss: 0.270049 | Test R²: -0.7439
+Epoch [ 20/100] | Train Loss: 0.130320 | Test Loss: 0.163584 | Test R²: -0.0564
+Epoch [ 30/100] | Train Loss: 0.101337 | Test Loss: 0.115650 | Test R²: 0.2532
+Epoch [ 40/100] | Train Loss: 0.114483 | Test Loss: 0.113234 | Test R²: 0.2688
+Epoch [ 50/100] | Train Loss: 0.066608 | Test Loss: 0.042156 | Test R²: 0.7278
+Epoch [ 60/100] | Train Loss: 0.032636 | Test Loss: 0.015389 | Test R²: 0.9006
+Epoch [ 70/100] | Train Loss: 0.025356 | Test Loss: 0.017838 | Test R²: 0.8848
+Epoch [ 80/100] | Train Loss: 0.024294 | Test Loss: 0.018811 | Test R²: 0.8785
+Epoch [ 90/100] | Train Loss: 0.022093 | Test Loss: 0.013700 | Test R²: 0.9115
+Epoch [100/100] | Train Loss: 0.023494 | Test Loss: 0.011377 | Test R²: 0.9265
+
+✓ Training completed!
+
+--------------------------------------------------------------------------------
+4.4 Training History Visualization
+--------------------------------------------------------------------------------
+
+✓ Training history plots saved as 'results/training_history_concentration_snn.png'
+
+--------------------------------------------------------------------------------
+4.5 Final Model Evaluation
+--------------------------------------------------------------------------------
+
+================================================================================
+FINAL MODEL PERFORMANCE METRICS (on original scale)
+================================================================================
+
+Mean Squared Error (MSE): 4.107262
+Root Mean Squared Error (RMSE): 2.026638%
+Mean Absolute Error (MAE): 1.678993%
+R² Score: 0.926528
+
+Baseline comparison:
+  Mean concentration: 9.462%
+  Std concentration: 7.477%
+  MAE as % of mean: 17.75%
+
+--------------------------------------------------------------------------------
+4.6 Prediction Visualization
+--------------------------------------------------------------------------------
+
+✓ Model evaluation plots saved as 'results/model_evaluation_concentration_snn.png'
+
+--------------------------------------------------------------------------------
+4.7 Analyzing Spiking Activity in Hidden Layers
+--------------------------------------------------------------------------------
+
+Spike rates:
+  Hidden Layer 1 (28 neurons): 0.0704
+  Hidden Layer 2 (14 neurons): 0.1829
+
+✓ Spiking activity plots saved as 'results/spiking_activity_concentration_snn.png'
+
+================================================================================
+FINAL SUMMARY: CONCENTRATION REGRESSION SNN
+================================================================================
+
+PROJECT COMPLETED SUCCESSFULLY!
+
+1. DATASET ANALYSIS:
+   ✓ Loaded ethanol concentration dataset from time-series sensor data
+   ✓ Processed 65 unique files
+   ✓ Concentrations: [np.float64(1.0), np.float64(2.5), np.float64(5.0), np.float64(10.0), np.float64(15.0), np.float64(20.0)]%
+   ✓ Removed 500 time points (stabilization period)
+   ✓ Created aggregate features from time-series data
+
+2. DATA PREPROCESSING:
+   ✓ Features per sample: 34
+   ✓ Total samples: 65
+   ✓ Train/test split: 52/13 samples
+   ✓ Concentration range: [1.0%, 20.0%]
+
+3. SPIKE ENCODING:
+   ✓ Used latency encoding (temporal coding)
+   ✓ Encoded data into 25 time steps
+   ✓ Higher values → earlier spikes
+   ✓ Total training spikes: 1,724
+
+4. SNN ARCHITECTURE (Based on Diagram):
+   ✓ Input: 34 features (Array #1, Array #8, Analyte on/off)
+   ✓ Hidden Layer 1: 28 LIF neurons (from diagram)
+   ✓ Hidden Layer 2: 14 LIF neurons (from diagram)
+   ✓ Output: 1 neuron (concentration regression)
+   ✓ Total parameters: 1,401
+
+5. MODEL PERFORMANCE:
+   ✓ RMSE: 2.026638%
+   ✓ MAE: 1.678993%
+   ✓ R² Score: 0.926528
+   ✓ Error rate: 17.75% of mean
+   ✓ Trained for 100 epochs
+
+6. KEY FEATURES:
+   ✓ Architecture matches the provided diagram
+   ✓ Single output for continuous concentration prediction
+   ✓ Regression task instead of classification
+   ✓ Uses membrane potential for continuous output
+
+7. GENERATED VISUALIZATIONS:
+   ✓ results/training_history_concentration_snn.png - Training progress
+   ✓ results/model_evaluation_concentration_snn.png - Prediction analysis
+   ✓ results/spiking_activity_concentration_snn.png - Neural spiking patterns
+
+KEY INSIGHTS:
+- Successfully implemented SNN for concentration regression
+- Latency encoding effectively represents aggregate sensor features
+- SNN architecture with 28 and 14 hidden neurons performs well for regression
+- Sparse spiking activity demonstrates energy-efficient computation
+- Model accurately predicts ethanol concentrations from sensor data
+
+NEXT STEPS:
+- Fine-tune hyperparameters (beta, num_steps, learning rate)
+- Experiment with different aggregation strategies for time-series
+- Try different spike encoding methods (rate coding, delta modulation)
+- Extend to multi-output regression for multiple analytes
+- Deploy model for real-time concentration monitoring
+
+
+================================================================================
+Implementation complete with architecture matching the provided diagram!
+================================================================================
