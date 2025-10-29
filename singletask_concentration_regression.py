@@ -33,7 +33,6 @@ from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
 import snntorch as snn
 from snntorch import spikegen
 from snntorch import functional as SF
-from snntorch import utils
 
 warnings.filterwarnings('ignore')
 
