@@ -32,7 +32,7 @@ def load_wine_dataset(base_path):
         folder_name = os.path.basename(root)
 
         # Only process files inside wine data directories (case-insensitive)
-        if folder_name in ['LQ_Wines', 'HQ_Wines', 'AQ_Wines']:
+        if folder_name.lower() in ['lq_wines', 'hq_wines', 'aq_wines']:
             print(f"  Processing folder: {folder_name}...")
 
             for file_name in files:
