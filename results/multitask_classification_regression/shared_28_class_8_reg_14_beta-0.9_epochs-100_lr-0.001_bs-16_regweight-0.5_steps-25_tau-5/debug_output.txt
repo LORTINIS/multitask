@@ -1,0 +1,209 @@
+================================================================================
+MULTITASK SNN TRAINING DISPATCHER
+================================================================================
+
+================================================================================
+AVAILABLE ARCHITECTURES
+================================================================================
+
+1. shared_28_14_class_8_reg_1
+   Module: shared_28_14_class_8_reg_1.py
+   Description:
+
+2. shared_28_class_8_reg_14
+   Module: shared_28_class_8_reg_14.py
+   Description:
+
+================================================================================
+
+Select an architecture to train:
+  1. shared_28_14_class_8_reg_1
+  2. shared_28_class_8_reg_14
+
+Enter choice (1-2): 2
+
+✓ Selected architecture: shared_28_class_8_reg_14
+✓ Training script: train_single_shared_layer.py
+
+================================================================================
+LAUNCHING TRAINING: train_single_shared_layer.py
+================================================================================
+
+================================================================================
+MULTITASK SNN: WINE CLASSIFICATION + ETHANOL REGRESSION
+SINGLE SHARED LAYER ARCHITECTURE
+================================================================================
+
+✓ Selected architecture: shared_28_class_8_reg_14
+Wine data path: C:\Users\appoo\PES\Sem 5\AFML\Nose\Implementation\multitask\data\wine
+Ethanol data path: C:\Users\appoo\PES\Sem 5\AFML\Nose\Implementation\multitask\data\wine
+
+Using device: cuda
+
+================================================================================
+LOADING AND PREPROCESSING DATA
+================================================================================
+
+Loading wine dataset...
+Loading wine dataset from: C:\Users\appoo\PES\Sem 5\AFML\Nose\Implementation\multitask\data\wine
+  Processing folder: AQ_Wines...
+  Processing folder: HQ_Wines...
+  Processing folder: LQ_Wines...
+  Wine data loaded: 782550 rows, 235 files
+Removing first 500 time points from wine data...
+
+Loading ethanol dataset...
+Loading ethanol dataset from: C:\Users\appoo\PES\Sem 5\AFML\Nose\Implementation\multitask\data\wine
+  Processing folder: Ethanol...
+  Ethanol data loaded: 216450 rows, 65 files
+  Unique concentrations: [np.float64(1.0), np.float64(2.5), np.float64(5.0), np.float64(10.0), np.float64(15.0), np.float64(20.0)]
+Removing first 500 time points from ethanol data...
+
+================================================================================
+FEATURE ENGINEERING AND PREPROCESSING
+================================================================================
+
+Aggregating time-series data into features...
+  Wine aggregated shape: (235, 39)
+  Ethanol aggregated shape: (65, 38)
+
+Wine Classification Task:
+  Features: 34
+  Samples: 235
+  Classes: ['AQ' 'HQ' 'LQ']
+    AQ: 43 samples (encoded as 0)
+    HQ: 51 samples (encoded as 1)
+    LQ: 141 samples (encoded as 2)
+
+Ethanol Regression Task:
+  Features: 34
+  Samples: 65
+  Concentration range: [1.0%, 20.0%]
+    1.0%: 10 samples
+    2.5%: 10 samples
+    5.0%: 11 samples
+    10.0%: 12 samples
+    15.0%: 11 samples
+    20.0%: 11 samples
+
+Handling missing values...
+Normalizing features to [0, 1]...
+
+  Wine features normalized: [0.000, 1.000]
+  Ethanol features normalized: [0.000, 1.000]
+  Ethanol target normalized: [0.000, 1.000]
+
+================================================================================
+CREATING TRAIN-TEST SPLITS
+================================================================================
+
+Wine Classification Split:
+  Train: 188 samples
+  Test: 47 samples
+
+Ethanol Regression Split:
+  Train: 52 samples
+  Test: 13 samples
+
+================================================================================
+ENCODING SPIKE TRAINS
+================================================================================
+  Creating spike trains for 188 samples with 34 features...
+    Spike train shape: torch.Size([25, 188, 34])
+    Format: (time_steps=25, samples=188, features=34)
+    Total spikes: 6,330
+    Average spike rate: 0.0396
+  Creating spike trains for 47 samples with 34 features...
+    Spike train shape: torch.Size([25, 47, 34])
+    Format: (time_steps=25, samples=47, features=34)
+    Total spikes: 1,590
+    Average spike rate: 0.0398
+  Creating spike trains for 52 samples with 34 features...
+    Spike train shape: torch.Size([25, 52, 34])
+    Format: (time_steps=25, samples=52, features=34)
+    Total spikes: 1,724
+    Average spike rate: 0.0390
+  Creating spike trains for 13 samples with 34 features...
+    Spike train shape: torch.Size([25, 13, 34])
+    Format: (time_steps=25, samples=13, features=34)
+    Total spikes: 421
+    Average spike rate: 0.0381
+Wine train spikes: torch.Size([25, 188, 34])
+Ethanol train spikes: torch.Size([25, 52, 34])
+
+================================================================================
+CREATING MULTITASK SNN
+================================================================================
+
+================================================================================
+MULTITASK SNN ARCHITECTURE: shared_28_class_8_reg_14
+================================================================================
+
+SHARED LAYER (Purple - Common Processing):
+  Input Size:              34
+  Shared Hidden Layer:     28 LIF neurons
+
+CLASSIFICATION BRANCH (Red - Analyte Classification):
+  Classification Hidden:   8 LIF neurons
+  Output:                  3 classes (Wine Quality)
+
+REGRESSION BRANCH (Teal - Concentration Estimation):
+  Regression Hidden:       14 LIF neurons
+  Output:                  1 neuron (Ethanol Concentration)
+
+PARAMETERS:
+  Total:                   1,660
+  Trainable:               1,660
+================================================================================
+
+
+================================================================================
+TRAINING
+================================================================================
+Epoch [5/100] | Total Loss: 9.2904 | Class Loss: 18.0869 | Reg Loss: 0.4938
+Epoch [10/100] | Total Loss: 1.6215 | Class Loss: 3.2015 | Reg Loss: 0.0415
+Epoch [15/100] | Total Loss: 0.4802 | Class Loss: 0.8931 | Reg Loss: 0.0674
+Epoch [20/100] | Total Loss: 0.8313 | Class Loss: 1.5841 | Reg Loss: 0.0785
+Epoch [25/100] | Total Loss: 0.4323 | Class Loss: 0.7927 | Reg Loss: 0.0719
+Epoch [30/100] | Total Loss: 0.2576 | Class Loss: 0.4539 | Reg Loss: 0.0613
+Epoch [35/100] | Total Loss: 0.1424 | Class Loss: 0.2220 | Reg Loss: 0.0629
+Epoch [40/100] | Total Loss: 0.1027 | Class Loss: 0.1467 | Reg Loss: 0.0587
+Epoch [45/100] | Total Loss: 0.0542 | Class Loss: 0.0701 | Reg Loss: 0.0382
+Epoch [50/100] | Total Loss: 0.0393 | Class Loss: 0.0295 | Reg Loss: 0.0490
+Epoch [55/100] | Total Loss: 0.0456 | Class Loss: 0.0404 | Reg Loss: 0.0508
+Epoch [60/100] | Total Loss: 0.0229 | Class Loss: 0.0118 | Reg Loss: 0.0340
+Epoch [65/100] | Total Loss: 0.0254 | Class Loss: 0.0133 | Reg Loss: 0.0375
+Epoch [70/100] | Total Loss: 0.0242 | Class Loss: 0.0165 | Reg Loss: 0.0319
+Epoch [75/100] | Total Loss: 0.0365 | Class Loss: 0.0367 | Reg Loss: 0.0364
+Epoch [80/100] | Total Loss: 0.0276 | Class Loss: 0.0063 | Reg Loss: 0.0488
+Epoch [85/100] | Total Loss: 0.0298 | Class Loss: 0.0107 | Reg Loss: 0.0489
+Epoch [90/100] | Total Loss: 0.0307 | Class Loss: 0.0170 | Reg Loss: 0.0444
+Epoch [95/100] | Total Loss: 0.0158 | Class Loss: 0.0077 | Reg Loss: 0.0238
+Epoch [100/100] | Total Loss: 0.0202 | Class Loss: 0.0051 | Reg Loss: 0.0353
+
+Training completed!
+
+================================================================================
+EVALUATION
+================================================================================
+
+--- WINE CLASSIFICATION RESULTS ---
+Accuracy:  1.0000
+Precision: 1.0000
+Recall:    1.0000
+F1-Score:  1.0000
+
+--- ETHANOL CONCENTRATION REGRESSION RESULTS ---
+RMSE: 0.2454
+MAE:  0.1895
+R²:   0.6111
+
+Model saved to: models\shared_28_class_8_reg_14_beta-0.9_epochs-100_lr-0.001_bs-16_regweight-0.5_steps-25_tau-5_20251030_092106.pth
+
+================================================================================
+GENERATING VISUALIZATIONS
+================================================================================
+
+================================================================================
+ALL DONE!
+================================================================================
