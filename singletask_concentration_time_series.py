@@ -164,7 +164,7 @@ environmental_cols = ['Rel_Humidity (%)', 'Temperature (C)']
 feature_cols = sensor_cols + environmental_cols
 
 # Configuration
-SEQUENCE_LENGTH = 500
+SEQUENCE_LENGTH = 1000
 DOWNSAMPLE_FACTOR = 2
 
 print(f"\nTime series configuration:")
@@ -321,7 +321,7 @@ We convert normalized time series values directly to binary spikes:
 - Preserves temporal dynamics throughout the sequence
 """)
 
-ENCODING_TYPE = 'direct'
+ENCODING_TYPE = 'rate'
 
 print(f"\nEncoding type: {ENCODING_TYPE}")
 
@@ -351,12 +351,56 @@ def encode_time_series_direct(sequences):
     
     return spike_data
 
-# Encode training and test data
-print("\nEncoding training data:")
-spike_train = encode_time_series_direct(X_train)
 
-print("\nEncoding test data:")
-spike_test = encode_time_series_direct(X_test)
+
+def encode_time_series_rate(sequences, num_steps=100):
+    """
+    Encode time series using rate encoding.
+    Each input value in [0,1] determines the probability of a spike
+    at each timestep across 'num_steps'.
+    """
+    print(f"  Encoding {sequences.shape[0]} sequences with rate encoding ({num_steps} timesteps)...")
+
+    # Convert to tensor
+    sequences_tensor = torch.FloatTensor(sequences)
+    
+    # Ensure data is normalized to [0, 1]
+    min_val = sequences_tensor.min()
+    max_val = sequences_tensor.max()
+    if max_val > 1.0 or min_val < 0.0:
+        sequences_tensor = (sequences_tensor - min_val) / (max_val - min_val + 1e-8)
+        print(f"  Normalized data from [{min_val:.3f}, {max_val:.3f}] → [0, 1]")
+
+    # Generate random spikes according to rate
+    # Shape: [timesteps, samples, features]
+    rand = torch.rand((num_steps, *sequences_tensor.shape))
+    spike_data = (rand < sequences_tensor.unsqueeze(0)).float()
+
+    print(f"  Spike data shape: {spike_data.shape} (timesteps, samples, features)")
+    
+    # Calculate statistics
+    total_spikes = spike_data.sum().item()
+    spike_rate = total_spikes / spike_data.numel()
+    print(f"  Total spikes: {total_spikes:,.0f}")
+    print(f"  Average spike rate: {spike_rate:.4f}")
+
+    return spike_data
+
+
+if ENCODING_TYPE == 'rate':
+    # Encode training and test data
+    print("\nEncoding training data:")
+    spike_train = encode_time_series_rate(X_train, num_steps=100)
+
+    print("\nEncoding test data:")
+    spike_test = encode_time_series_rate(X_test, num_steps=100)
+else:
+    # Encode training and test data
+    print("\nEncoding training data:")
+    spike_train = encode_time_series_direct(X_train)
+
+    print("\nEncoding test data:")
+    spike_test = encode_time_series_direct(X_test)
 
 # Convert labels to tensors
 y_train_tensor = torch.FloatTensor(y_train)
