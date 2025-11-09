@@ -36,17 +36,17 @@ def load_wine_dataset(base_path: str) -> pd.DataFrame:
     all_data = []
 
     # TOGGLE TEMP HUMIDITY
-    
-    ts_columns = [
-        'Rel_Humidity (%)', 'Temperature (C)',
-        'MQ-3_R1 (kOhm)', 'MQ-4_R1 (kOhm)', 'MQ-6_R1 (kOhm)',
-        'MQ-3_R2 (kOhm)', 'MQ-4_R2 (kOhm)', 'MQ-6_R2 (kOhm)'
-    ]
 
     # ts_columns = [
+    #     'Rel_Humidity (%)', 'Temperature (C)',
     #     'MQ-3_R1 (kOhm)', 'MQ-4_R1 (kOhm)', 'MQ-6_R1 (kOhm)',
     #     'MQ-3_R2 (kOhm)', 'MQ-4_R2 (kOhm)', 'MQ-6_R2 (kOhm)'
     # ]
+
+    ts_columns = [
+        'MQ-3_R1 (kOhm)', 'MQ-4_R1 (kOhm)', 'MQ-6_R1 (kOhm)',
+        'MQ-3_R2 (kOhm)', 'MQ-4_R2 (kOhm)', 'MQ-6_R2 (kOhm)'
+    ]
     
     print(f"Loading data from: {base_path}")
     
@@ -246,8 +246,8 @@ def generate_and_save_spike_data(
     environmental_cols = ["Rel_Humidity (%)", "Temperature (C)"]
 
     # TOGGLE TEMP HUMIDITY
-    # feature_cols = sensor_cols 
-    feature_cols = sensor_cols + environmental_cols
+    feature_cols = sensor_cols
+    # feature_cols = sensor_cols + environmental_cols
     
     # Load dataset
     print("\n1. Loading Wine Dataset...")
