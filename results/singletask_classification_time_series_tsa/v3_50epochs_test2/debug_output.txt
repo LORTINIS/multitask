@@ -1,0 +1,73 @@
+================================================================================
+PART 4: TRAINING
+================================================================================
+Epoch [  1/50] | Train Loss: 155.6162 | Test Loss: 120.4456 | Train Acc: 60.64% | Test Acc: 59.57% | F1: 0.4448
+Epoch [ 10/50] | Train Loss: 0.3108 | Test Loss: 0.7402 | Train Acc: 96.28% | Test Acc: 93.62% | F1: 0.9314
+Epoch [ 20/50] | Train Loss: 0.1252 | Test Loss: 0.6413 | Train Acc: 97.34% | Test Acc: 93.62% | F1: 0.9314
+Epoch [ 30/50] | Train Loss: 0.0950 | Test Loss: 0.2748 | Train Acc: 97.87% | Test Acc: 95.74% | F1: 0.9555
+Epoch [ 40/50] | Train Loss: 0.1020 | Test Loss: 0.6068 | Train Acc: 97.87% | Test Acc: 93.62% | F1: 0.9314
+Epoch [ 50/50] | Train Loss: 0.1214 | Test Loss: 0.2295 | Train Acc: 97.87% | Test Acc: 95.74% | F1: 0.9555
+
+Training complete!
+
+--------------------------------------------------------------------------------
+4.1 Training Curves
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+4.2 Final Evaluation
+--------------------------------------------------------------------------------
+
+================================================================================
+FINAL PERFORMANCE
+================================================================================
+Accuracy: 95.74%
+F1 Score: 0.9555
+
+Classification Report:
+              precision    recall  f1-score   support
+
+          AQ       1.00      0.78      0.88         9
+          HQ       1.00      1.00      1.00        10
+          LQ       0.93      1.00      0.97        28
+
+    accuracy                           0.96        47
+   macro avg       0.98      0.93      0.95        47
+weighted avg       0.96      0.96      0.96        47
+
+
+--------------------------------------------------------------------------------
+4.3 Hidden Layer Spiking Activity
+--------------------------------------------------------------------------------
+Hidden Layer 1 spike rate: 0.0719
+Hidden Layer 2 spike rate: 0.0303
+
+================================================================================
+PART 5: TEMPORAL SPIKE ATTRIBUTION
+================================================================================
+Selected sample index: 0
+True label: AQ
+Predicted label: AQ
+Output membrane sums: [ -89.40015 -163.21011 -253.51877]
+
+Top attributed spikes:
+   timestep         feature  attribution
+0        32  MQ-6_R1 (kOhm)     1.889858
+1        34  MQ-6_R1 (kOhm)     1.871577
+2        33  MQ-6_R1 (kOhm)     1.441441
+3        35  MQ-6_R1 (kOhm)     1.256745
+4        34  MQ-4_R1 (kOhm)     1.255988
+5        24  MQ-6_R1 (kOhm)     1.250135
+6        21  MQ-6_R1 (kOhm)     1.189425
+7        31  MQ-6_R1 (kOhm)     1.147011
+8        27  MQ-6_R1 (kOhm)     1.101947
+9        32  MQ-4_R1 (kOhm)     1.014077
+
+Verification results:
+  Baseline prediction: AQ
+  Edited prediction:   AQ
+  Baseline membrane sums: [ -89.40015 -163.21011 -253.51877]
+  Edited membrane sums:   [-100.63582 -157.50455 -246.36993]
+  Random edit #1: prediction = AQ, membrane sums = [-101.29164 -164.6665  -250.80576]
+  Random edit #2: prediction = AQ, membrane sums = [ -99.07115 -161.75851 -244.3194 ]
+  Random edit #3: prediction = AQ, membrane sums = [ -95.76512 -161.71259 -248.09027]
