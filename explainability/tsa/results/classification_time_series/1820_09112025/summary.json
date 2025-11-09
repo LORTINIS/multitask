@@ -1,0 +1,442 @@
+{
+  "timestamp": "1820_09112025",
+  "datetime": "2025-11-09T18:20:50.745511",
+  "device": "cuda",
+  "args": {
+    "checkpoint": "../../trained_models/wine_timeseries_snn_tsa_seq500_beta0.9_bs16_lr0.001_ep50.pth",
+    "spike_data_dir": "../../data/spike_data",
+    "sample_index": 0,
+    "num_random_samples": 5,
+    "full_dataset_tsa": true
+  },
+  "model": {
+    "checkpoint": "C:\\Users\\appoo\\PES\\Sem 5\\AFML\\Nose\\Implementation\\multitask\\trained_models\\wine_timeseries_snn_tsa_seq500_beta0.9_bs16_lr0.001_ep50.pth",
+    "input_size": 8,
+    "hidden1": 28,
+    "hidden2": 8,
+    "output_size": 3,
+    "beta": 0.9
+  },
+  "selected_sample": {
+    "index": 0,
+    "true_label": "AQ",
+    "true_label_idx": 0,
+    "shape": [
+      500,
+      8
+    ]
+  },
+  "sample_analysis": {
+    "predicted_class": "HQ",
+    "predicted_class_idx": 1,
+    "membrane_potentials": [
+      -203.85804748535156,
+      -133.209228515625,
+      -203.8668975830078
+    ],
+    "correct_prediction": false
+  },
+  "random_samples": [
+    {
+      "index": 13,
+      "true_class": "LQ",
+      "true_class_idx": 2,
+      "predicted_class": "LQ",
+      "predicted_class_idx": 2,
+      "membrane_potentials": [
+        -133.99945068359375,
+        -150.31893920898438,
+        -130.34457397460938
+      ],
+      "correct_prediction": true
+    },
+    {
+      "index": 16,
+      "true_class": "HQ",
+      "true_class_idx": 1,
+      "predicted_class": "HQ",
+      "predicted_class_idx": 1,
+      "membrane_potentials": [
+        -257.2509765625,
+        -111.11819458007812,
+        -156.04611206054688
+      ],
+      "correct_prediction": true
+    },
+    {
+      "index": 0,
+      "true_class": "AQ",
+      "true_class_idx": 0,
+      "predicted_class": "HQ",
+      "predicted_class_idx": 1,
+      "membrane_potentials": [
+        -203.85804748535156,
+        -133.209228515625,
+        -203.8668975830078
+      ],
+      "correct_prediction": false
+    },
+    {
+      "index": 26,
+      "true_class": "LQ",
+      "true_class_idx": 2,
+      "predicted_class": "LQ",
+      "predicted_class_idx": 2,
+      "membrane_potentials": [
+        -133.99945068359375,
+        -150.31893920898438,
+        -130.34457397460938
+      ],
+      "correct_prediction": true
+    },
+    {
+      "index": 6,
+      "true_class": "LQ",
+      "true_class_idx": 2,
+      "predicted_class": "LQ",
+      "predicted_class_idx": 2,
+      "membrane_potentials": [
+        -133.99945068359375,
+        -150.31893920898438,
+        -130.34457397460938
+      ],
+      "correct_prediction": true
+    }
+  ],
+  "class_specific_tsa": {
+    "full_dataset": true,
+    "total_samples_analyzed": 235,
+    "train_samples": 188,
+    "test_samples": 47,
+    "classes": {
+      "AQ": {
+        "num_samples": 43,
+        "attribution_stats": {
+          "mean": -0.006404350511729717,
+          "std": 0.10109207034111023,
+          "min": -0.16935381293296814,
+          "max": 1.0497978925704956
+        }
+      },
+      "HQ": {
+        "num_samples": 51,
+        "attribution_stats": {
+          "mean": 0.024914883077144623,
+          "std": 0.06992324441671371,
+          "min": -0.1303686797618866,
+          "max": 0.24114522337913513
+        }
+      },
+      "LQ": {
+        "num_samples": 141,
+        "attribution_stats": {
+          "mean": 0.03522660955786705,
+          "std": 0.08604532480239868,
+          "min": -0.06641874462366104,
+          "max": 0.35700491070747375
+        }
+      }
+    }
+  },
+  "perturbation_analysis": {
+    "description": "Analysis of how removing spikes affects model predictions",
+    "baseline": {
+      "predicted_class_idx": 1,
+      "membrane_potentials": {
+        "class_0": -203.85804748535156,
+        "class_1": -133.209228515625,
+        "class_2": -203.8668975830078
+      },
+      "predicted_class_membrane_potential": -133.209228515625
+    },
+    "k_values_tested": [
+      1,
+      6,
+      11,
+      16,
+      21,
+      26,
+      31,
+      36,
+      41,
+      46
+    ],
+    "top_k_deletions": {
+      "description": "Removing the k most important spikes (highest TSA attribution)",
+      "results": [
+        {
+          "k": 1,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -203.88845825195312,
+            "class_1": -133.18655395507812,
+            "class_2": -203.81930541992188
+          },
+          "original_class_membrane_potential": -133.18655395507812,
+          "membrane_potential_drop": -0.022674560546875,
+          "membrane_potential_drop_percentage": 0.01702176403207331
+        },
+        {
+          "k": 6,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -200.96969604492188,
+            "class_1": -129.14797973632812,
+            "class_2": -197.3443145751953
+          },
+          "original_class_membrane_potential": -129.14797973632812,
+          "membrane_potential_drop": -4.061248779296875,
+          "membrane_potential_drop_percentage": 3.048774341351661
+        },
+        {
+          "k": 11,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -204.75631713867188,
+            "class_1": -132.30328369140625,
+            "class_2": -198.42298889160156
+          },
+          "original_class_membrane_potential": -132.30328369140625,
+          "membrane_potential_drop": -0.90594482421875,
+          "membrane_potential_drop_percentage": 0.6800916380297823
+        },
+        {
+          "k": 16,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -205.70907592773438,
+            "class_1": -131.59246826171875,
+            "class_2": -196.9320526123047
+          },
+          "original_class_membrane_potential": -131.59246826171875,
+          "membrane_potential_drop": -1.61676025390625,
+          "membrane_potential_drop_percentage": 1.2136998854524628
+        },
+        {
+          "k": 21,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -205.98663330078125,
+            "class_1": -131.3854217529297,
+            "class_2": -196.49774169921875
+          },
+          "original_class_membrane_potential": -131.3854217529297,
+          "membrane_potential_drop": -1.8238067626953125,
+          "membrane_potential_drop_percentage": 1.3691294387170676
+        },
+        {
+          "k": 26,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -206.0189208984375,
+            "class_1": -131.361328125,
+            "class_2": -196.44720458984375
+          },
+          "original_class_membrane_potential": -131.361328125,
+          "membrane_potential_drop": -1.847900390625,
+          "membrane_potential_drop_percentage": 1.387216494845361
+        },
+        {
+          "k": 31,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -204.85052490234375,
+            "class_1": -132.23301696777344,
+            "class_2": -198.27560424804688
+          },
+          "original_class_membrane_potential": -132.23301696777344,
+          "membrane_potential_drop": -0.9762115478515625,
+          "membrane_potential_drop_percentage": 0.7328407789232532
+        },
+        {
+          "k": 36,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -206.1688690185547,
+            "class_1": -131.24945068359375,
+            "class_2": -196.21255493164062
+          },
+          "original_class_membrane_potential": -131.24945068359375,
+          "membrane_potential_drop": -1.95977783203125,
+          "membrane_potential_drop_percentage": 1.4712027491408934
+        },
+        {
+          "k": 41,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -206.54925537109375,
+            "class_1": -130.96566772460938,
+            "class_2": -195.61727905273438
+          },
+          "original_class_membrane_potential": -130.96566772460938,
+          "membrane_potential_drop": -2.243560791015625,
+          "membrane_potential_drop_percentage": 1.684238258877434
+        },
+        {
+          "k": 46,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -206.03497314453125,
+            "class_1": -131.34933471679688,
+            "class_2": -196.42208862304688
+          },
+          "original_class_membrane_potential": -131.34933471679688,
+          "membrane_potential_drop": -1.859893798828125,
+          "membrane_potential_drop_percentage": 1.3962199312714776
+        }
+      ]
+    },
+    "random_k_deletions": {
+      "description": "Removing k random spikes for comparison",
+      "results": [
+        {
+          "k": 1,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -204.04165649414062,
+            "class_1": -133.072265625,
+            "class_2": -203.57957458496094
+          },
+          "original_class_membrane_potential": -133.072265625,
+          "membrane_potential_drop": -0.136962890625,
+          "membrane_potential_drop_percentage": 0.10281786941580756
+        },
+        {
+          "k": 6,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -202.18905639648438,
+            "class_1": -128.70986938476562,
+            "class_2": -203.5126190185547
+          },
+          "original_class_membrane_potential": -128.70986938476562,
+          "membrane_potential_drop": -4.499359130859375,
+          "membrane_potential_drop_percentage": 3.37766323024055
+        },
+        {
+          "k": 11,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -206.26626586914062,
+            "class_1": -131.26226806640625,
+            "class_2": -199.29307556152344
+          },
+          "original_class_membrane_potential": -131.26226806640625,
+          "membrane_potential_drop": -1.94696044921875,
+          "membrane_potential_drop_percentage": 1.4615807560137457
+        },
+        {
+          "k": 16,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -205.85174560546875,
+            "class_1": -131.7218475341797,
+            "class_2": -200.74703979492188
+          },
+          "original_class_membrane_potential": -131.7218475341797,
+          "membrane_potential_drop": -1.4873809814453125,
+          "membrane_potential_drop_percentage": 1.1165750286368843
+        },
+        {
+          "k": 21,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -206.26271057128906,
+            "class_1": -131.26490783691406,
+            "class_2": -199.29864501953125
+          },
+          "original_class_membrane_potential": -131.26490783691406,
+          "membrane_potential_drop": -1.9443206787109375,
+          "membrane_potential_drop_percentage": 1.4595990836197021
+        },
+        {
+          "k": 26,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -203.06568908691406,
+            "class_1": -127.82003784179688,
+            "class_2": -198.10256958007812
+          },
+          "original_class_membrane_potential": -127.82003784179688,
+          "membrane_potential_drop": -5.389190673828125,
+          "membrane_potential_drop_percentage": 4.045658648339061
+        },
+        {
+          "k": 31,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -205.1818389892578,
+            "class_1": -126.09095001220703,
+            "class_2": -193.9857635498047
+          },
+          "original_class_membrane_potential": -126.09095001220703,
+          "membrane_potential_drop": -7.118278503417969,
+          "membrane_potential_drop_percentage": 5.343682703321878
+        },
+        {
+          "k": 36,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -210.38467407226562,
+            "class_1": -128.18972778320312,
+            "class_2": -192.84835815429688
+          },
+          "original_class_membrane_potential": -128.18972778320312,
+          "membrane_potential_drop": -5.019500732421875,
+          "membrane_potential_drop_percentage": 3.7681328751431846
+        },
+        {
+          "k": 41,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -205.64529418945312,
+            "class_1": -125.74520111083984,
+            "class_2": -193.26055908203125
+          },
+          "original_class_membrane_potential": -125.74520111083984,
+          "membrane_potential_drop": -7.464027404785156,
+          "membrane_potential_drop_percentage": 5.60323596792669
+        },
+        {
+          "k": 46,
+          "predicted_class_idx": 1,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -211.180908203125,
+            "class_1": -127.20955657958984,
+            "class_2": -186.7587890625
+          },
+          "original_class_membrane_potential": -127.20955657958984,
+          "membrane_potential_drop": -5.999671936035156,
+          "membrane_potential_drop_percentage": 4.503946162657503
+        }
+      ]
+    },
+    "summary": {
+      "top_k_average_drop": -1.7317779541015625,
+      "top_k_max_drop": -0.022674560546875,
+      "random_k_average_drop": -4.100565338134766,
+      "random_k_max_drop": -0.136962890625,
+      "top_k_more_effective": true
+    }
+  }
+}
