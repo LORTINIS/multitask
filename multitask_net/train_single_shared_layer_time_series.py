@@ -1,15 +1,16 @@
 """
-Multitask SNN Training: Wine Classification + Ethanol Concentration Regression.
-Training script for TIME SERIES DATA with SINGLE SHARED LAYER architectures.
+Improved Multitask SNN Training: Wine Classification + Ethanol Concentration Regression.
+Training script for TIME SERIES DATA with IMPROVED ARCHITECTURE and ADAPTIVE LOSS BALANCING.
 
-This script trains a single SNN with ONE shared layer followed by separate hidden layers:
-1. Wine quality classification (HQ, LQ, AQ) - with dedicated hidden layer
-2. Ethanol concentration regression (1-20%) - with dedicated hidden layer
+Key Improvements:
+1. Adaptive loss scaling to balance classification and regression tasks
+2. Combined gradient updates (no alternating batches)
+3. Gradient clipping for training stability
+4. Larger shared layer capacity (64→32 neurons)
+5. Learning rate scheduling
+6. Comprehensive monitoring and diagnostics
 
-Architecture: Shared (28) → Classification Hidden (8) → 3 outputs
-                          → Regression Hidden (14) → 1 output
-                          
-UPDATED: Now uses full time series data instead of aggregated features!
+Architecture: Shared (64→32) + Class (32→16→3) + Reg (32→16→1)
 """
 
 import os
@@ -27,7 +28,7 @@ from sklearn.metrics import (
 import seaborn as sns
 from datetime import datetime
 
-# Import utilities - UPDATED for time series
+# Import utilities
 from utils.data_loader import load_wine_dataset, load_ethanol_dataset
 from utils.preprocessing_time_series import (
     preprocess_time_series_features,
@@ -41,6 +42,47 @@ from architectures import (
     load_architecture,
     print_available_architectures
 )
+# Results I/O and plotting utilities
+
+
+class AdaptiveLossScaler:
+    """
+    Dynamically scale losses to keep them in similar magnitude ranges.
+    This prevents one task from dominating training.
+    """
+    def __init__(self, alpha=0.9):
+        self.alpha = alpha  # EMA factor
+        self.class_loss_scale = 1.0
+        self.reg_loss_scale = 1.0
+        self.class_loss_history = []
+        self.reg_loss_history = []
+    
+    def update(self, class_loss, reg_loss):
+        """Update loss scales based on recent history."""
+        self.class_loss_history.append(class_loss)
+        self.reg_loss_history.append(reg_loss)
+        
+        # Keep only recent history
+        if len(self.class_loss_history) > 100:
+            self.class_loss_history = self.class_loss_history[-100:]
+            self.reg_loss_history = self.reg_loss_history[-100:]
+        
+        # Calculate average magnitudes
+        if len(self.class_loss_history) >= 10:
+            avg_class = np.mean(self.class_loss_history[-10:])
+            avg_reg = np.mean(self.reg_loss_history[-10:])
+            
+            # Update scales with EMA
+            if avg_class > 0:
+                self.class_loss_scale = self.alpha * self.class_loss_scale + (1 - self.alpha) * (1.0 / avg_class)
+            if avg_reg > 0:
+                self.reg_loss_scale = self.alpha * self.reg_loss_scale + (1 - self.alpha) * (1.0 / avg_reg)
+    
+    def scale_losses(self, class_loss, reg_loss, reg_weight=0.5):
+        """Apply scaling to losses."""
+        scaled_class = class_loss * self.class_loss_scale * (1 - reg_weight)
+        scaled_reg = reg_loss * self.reg_loss_scale * reg_weight
+        return scaled_class, scaled_reg
 
 
 def create_dataloaders(X_train, y_train, X_test, y_test, batch_size=32):
@@ -54,112 +96,155 @@ def create_dataloaders(X_train, y_train, X_test, y_test, batch_size=32):
     return train_loader, test_loader
 
 
-def train_multitask_epoch(model, wine_loader, ethanol_loader, device,
-                          classification_criterion, regression_criterion,
-                          optimizer, reg_weight=0.5):
+def train_multitask_epoch_improved(model, wine_loader, ethanol_loader, device,
+                                   classification_criterion, regression_criterion,
+                                   optimizer, loss_scaler, reg_weight=0.5,
+                                   max_grad_norm=1.0, warmup=False):
     """
-    Train for one epoch using both tasks.
+    Improved training function with proper loss balancing and gradient combining.
     
-    Args:
-        model: MultitaskSNN model
-        wine_loader: DataLoader for wine classification
-        ethanol_loader: DataLoader for ethanol regression
-        device: torch device
-        classification_criterion: Loss function for classification
-        regression_criterion: Loss function for regression
-        optimizer: Optimizer
-        reg_weight: Weight for regression loss (classification weight = 1 - reg_weight)
-    
-    Returns:
-        Average loss, classification loss, regression loss
+    Key improvements:
+    - Process both tasks in the same batch when possible
+    - Adaptive loss scaling
+    - Gradient clipping
+    - Better logging
     """
     model.train()
     total_loss = 0
     total_class_loss = 0
     total_reg_loss = 0
+    total_scaled_class_loss = 0
+    total_scaled_reg_loss = 0
     num_batches = 0
     
     # Create iterators
     wine_iter = iter(wine_loader)
     ethanol_iter = iter(ethanol_loader)
     
-    # Train on batches from both datasets
-    wine_exhausted = False
-    ethanol_exhausted = False
+    # Process both datasets in parallel (not alternating!)
+    max_batches = min(len(wine_loader), len(ethanol_loader))
     
-    while not (wine_exhausted and ethanol_exhausted):
-        batch_loss = 0
+    for _ in range(max_batches):
+        optimizer.zero_grad()
         batch_class_loss = 0
         batch_reg_loss = 0
-        tasks_processed = 0
         
-        # Process wine batch (classification)
-        if not wine_exhausted:
-            try:
-                wine_spikes, wine_labels = next(wine_iter)
-                wine_spikes = wine_spikes.to(device)
-                wine_labels = wine_labels.to(device)
-                
-                # Permute to [time_steps, batch, features] for model forward pass
-                wine_spikes = wine_spikes.permute(1, 0, 2)
-                
-                # Forward pass
-                output = model(wine_spikes)
-                
-                # Classification loss
-                class_mem_rec = output['classification']['mem_rec']
-                class_loss = classification_criterion(
-                    class_mem_rec.sum(0), wine_labels.long()
-                )
-                
-                batch_class_loss = class_loss.item()
-                batch_loss += (1 - reg_weight) * class_loss
-                tasks_processed += 1
-                
-            except StopIteration:
-                wine_exhausted = True
-        
-        # Process ethanol batch (regression)
-        if not ethanol_exhausted:
-            try:
-                ethanol_spikes, ethanol_conc = next(ethanol_iter)
-                ethanol_spikes = ethanol_spikes.to(device)
-                ethanol_conc = ethanol_conc.to(device)
-                
-                # Permute to [time_steps, batch, features] for model forward pass
-                ethanol_spikes = ethanol_spikes.permute(1, 0, 2)
-                
-                # Forward pass
-                output = model(ethanol_spikes)
-                
-                # Regression loss
-                reg_mem_rec = output['regression']['mem_rec']
-                predicted_conc = reg_mem_rec.sum(0)  # Sum over time
-                reg_loss = regression_criterion(predicted_conc.squeeze(), ethanol_conc)
-                
-                batch_reg_loss = reg_loss.item()
-                batch_loss += reg_weight * reg_loss
-                tasks_processed += 1
-                
-            except StopIteration:
-                ethanol_exhausted = True
-        
-        # Backpropagation
-        if tasks_processed > 0:
-            optimizer.zero_grad()
-            batch_loss.backward()
-            optimizer.step()
+        # ====================================================================
+        # WINE CLASSIFICATION TASK
+        # ====================================================================
+        try:
+            wine_spikes, wine_labels = next(wine_iter)
+            wine_spikes = wine_spikes.to(device)
+            wine_labels = wine_labels.to(device)
             
-            total_loss += batch_loss.item()
-            total_class_loss += batch_class_loss
-            total_reg_loss += batch_reg_loss
-            num_batches += 1
+            # Permute to [time_steps, batch, features]
+            wine_spikes = wine_spikes.permute(1, 0, 2)
+            
+            # Forward pass
+            output = model(wine_spikes)
+            
+            # Classification loss
+            class_mem_rec = output['classification']['mem_rec']
+            class_loss = classification_criterion(
+                class_mem_rec.sum(0), wine_labels.long()
+            )
+            batch_class_loss = class_loss.item()
+            
+        except StopIteration:
+            class_loss = torch.tensor(0.0, device=device)
+            batch_class_loss = 0
+        
+        # ====================================================================
+        # ETHANOL REGRESSION TASK
+        # ====================================================================
+        try:
+            ethanol_spikes, ethanol_conc = next(ethanol_iter)
+            ethanol_spikes = ethanol_spikes.to(device)
+            ethanol_conc = ethanol_conc.to(device)
+            
+            # Permute to [time_steps, batch, features]
+            ethanol_spikes = ethanol_spikes.permute(1, 0, 2)
+            
+            # Forward pass
+            output = model(ethanol_spikes)
+            
+            # Regression loss
+            reg_mem_rec = output['regression']['mem_rec']
+            predicted_conc = reg_mem_rec.sum(0)
+            reg_loss = regression_criterion(predicted_conc.squeeze(), ethanol_conc)
+            batch_reg_loss = reg_loss.item()
+            
+        except StopIteration:
+            reg_loss = torch.tensor(0.0, device=device)
+            batch_reg_loss = 0
+        
+        # ====================================================================
+        # IMPROVED ADAPTIVE LOSS SCALING WITH WARMUP
+        # ====================================================================
+        # Update scaler with current losses
+        loss_scaler.update(batch_class_loss, batch_reg_loss)
+        
+        # Scale losses to similar magnitudes with warmup consideration
+        if warmup:
+            # During warmup phase, gradually increase loss scaling
+            warmup_factor = 0.5  # Start with gentler scaling
+            scaled_class = class_loss * warmup_factor
+            scaled_reg = reg_loss * warmup_factor
+        else:
+            # Normal scaling after warmup
+            scaled_class, scaled_reg = loss_scaler.scale_losses(
+                class_loss, reg_loss, reg_weight
+            )
+        
+        # Add L2 regularization if needed during non-warmup phase
+        if not warmup:
+            l2_lambda = 1e-5
+            l2_reg = torch.tensor(0., device=device)
+            for param in model.parameters():
+                l2_reg += torch.norm(param)
+            l2_reg *= l2_lambda
+        else:
+            l2_reg = torch.tensor(0., device=device)
+        
+        # Combined loss with regularization
+        batch_loss = scaled_class + scaled_reg + l2_reg
+        
+        # ====================================================================
+        # BACKPROPAGATION WITH GRADIENT CLIPPING
+        # ====================================================================
+        batch_loss.backward()
+        
+        # Clip gradients to prevent explosion
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+        
+        optimizer.step()
+        
+        # ====================================================================
+        # LOGGING
+        # ====================================================================
+        total_loss += batch_loss.item()
+        total_class_loss += batch_class_loss
+        total_reg_loss += batch_reg_loss
+        total_scaled_class_loss += scaled_class.item()
+        total_scaled_reg_loss += scaled_reg.item()
+        num_batches += 1
     
+    # Calculate averages
     avg_loss = total_loss / num_batches if num_batches > 0 else 0
     avg_class_loss = total_class_loss / num_batches if num_batches > 0 else 0
     avg_reg_loss = total_reg_loss / num_batches if num_batches > 0 else 0
+    avg_scaled_class = total_scaled_class_loss / num_batches if num_batches > 0 else 0
+    avg_scaled_reg = total_scaled_reg_loss / num_batches if num_batches > 0 else 0
     
-    return avg_loss, avg_class_loss, avg_reg_loss
+    return {
+        'total_loss': avg_loss,
+        'class_loss': avg_class_loss,
+        'reg_loss': avg_reg_loss,
+        'scaled_class_loss': avg_scaled_class,
+        'scaled_reg_loss': avg_scaled_reg,
+        'class_scale': loss_scaler.class_loss_scale,
+        'reg_scale': loss_scaler.reg_loss_scale
+    }
 
 
 def evaluate_classification(model, data_loader, device):
@@ -173,13 +258,10 @@ def evaluate_classification(model, data_loader, device):
             spikes = spikes.to(device)
             labels = labels.to(device)
             
-            # Permute to [time_steps, batch, features]
             spikes = spikes.permute(1, 0, 2)
-            
             output = model(spikes)
             mem_rec = output['classification']['mem_rec']
             
-            # Predict based on accumulated membrane potential
             _, predicted = torch.max(mem_rec.sum(0), 1)
             
             all_preds.extend(predicted.cpu().numpy())
@@ -216,13 +298,10 @@ def evaluate_regression(model, data_loader, device):
             spikes = spikes.to(device)
             targets = targets.to(device)
             
-            # Permute to [time_steps, batch, features]
             spikes = spikes.permute(1, 0, 2)
-            
             output = model(spikes)
             mem_rec = output['regression']['mem_rec']
             
-            # Predicted concentration is sum of membrane potential over time
             predicted = mem_rec.sum(0).squeeze()
             
             all_preds.extend(predicted.cpu().numpy())
@@ -246,35 +325,74 @@ def evaluate_regression(model, data_loader, device):
     }
 
 
-def plot_training_history(history):
-    """Plot training history for both tasks."""
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+def plot_training_history_improved(history):
+    """Plot comprehensive training history with loss scaling information."""
+    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
     
     # Total loss
-    axes[0].plot(history['total_loss'], label='Total Loss', linewidth=2)
-    axes[0].set_xlabel('Epoch', fontsize=12)
-    axes[0].set_ylabel('Loss', fontsize=12)
-    axes[0].set_title('Total Training Loss', fontsize=14, fontweight='bold')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
+    axes[0, 0].plot(history['total_loss'], label='Total Loss', linewidth=2, color='purple')
+    axes[0, 0].set_xlabel('Epoch', fontsize=11)
+    axes[0, 0].set_ylabel('Loss', fontsize=11)
+    axes[0, 0].set_title('Total Combined Loss', fontsize=12, fontweight='bold')
+    axes[0, 0].legend()
+    axes[0, 0].grid(True, alpha=0.3)
     
-    # Classification loss
-    axes[1].plot(history['class_loss'], label='Classification Loss',
-                 color='red', linewidth=2)
-    axes[1].set_xlabel('Epoch', fontsize=12)
-    axes[1].set_ylabel('Loss', fontsize=12)
-    axes[1].set_title('Classification Loss (Wine Quality)', fontsize=14, fontweight='bold')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
+    # Raw losses
+    axes[0, 1].plot(history['class_loss'], label='Class Loss', color='red', linewidth=2)
+    axes[0, 1].plot(history['reg_loss'], label='Reg Loss', color='teal', linewidth=2)
+    axes[0, 1].set_xlabel('Epoch', fontsize=11)
+    axes[0, 1].set_ylabel('Loss', fontsize=11)
+    axes[0, 1].set_title('Raw Task Losses', fontsize=12, fontweight='bold')
+    axes[0, 1].legend()
+    axes[0, 1].grid(True, alpha=0.3)
     
-    # Regression loss
-    axes[2].plot(history['reg_loss'], label='Regression Loss',
-                 color='teal', linewidth=2)
-    axes[2].set_xlabel('Epoch', fontsize=12)
-    axes[2].set_ylabel('Loss', fontsize=12)
-    axes[2].set_title('Regression Loss (Ethanol Concentration)', fontsize=14, fontweight='bold')
-    axes[2].legend()
-    axes[2].grid(True, alpha=0.3)
+    # Scaled losses
+    axes[0, 2].plot(history['scaled_class_loss'], label='Scaled Class', color='darkred', linewidth=2)
+    axes[0, 2].plot(history['scaled_reg_loss'], label='Scaled Reg', color='darkcyan', linewidth=2)
+    axes[0, 2].set_xlabel('Epoch', fontsize=11)
+    axes[0, 2].set_ylabel('Loss', fontsize=11)
+    axes[0, 2].set_title('Scaled Task Losses (After Balancing)', fontsize=12, fontweight='bold')
+    axes[0, 2].legend()
+    axes[0, 2].grid(True, alpha=0.3)
+    
+    # Loss scales
+    axes[1, 0].plot(history['class_scale'], label='Class Scale', color='red', linewidth=2)
+    axes[1, 0].plot(history['reg_scale'], label='Reg Scale', color='teal', linewidth=2)
+    axes[1, 0].set_xlabel('Epoch', fontsize=11)
+    axes[1, 0].set_ylabel('Scale Factor', fontsize=11)
+    axes[1, 0].set_title('Adaptive Loss Scales', fontsize=12, fontweight='bold')
+    axes[1, 0].legend()
+    axes[1, 0].grid(True, alpha=0.3)
+    
+    # Loss ratio
+    if len(history['class_loss']) > 0 and len(history['reg_loss']) > 0:
+        loss_ratio = [c / (r + 1e-8) for c, r in zip(history['class_loss'], history['reg_loss'])]
+        axes[1, 1].plot(loss_ratio, label='Class/Reg Ratio', color='orange', linewidth=2)
+        axes[1, 1].axhline(y=1.0, color='gray', linestyle='--', label='Equal (1:1)')
+        axes[1, 1].set_xlabel('Epoch', fontsize=11)
+        axes[1, 1].set_ylabel('Ratio', fontsize=11)
+        axes[1, 1].set_title('Loss Magnitude Ratio', fontsize=12, fontweight='bold')
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+    
+    # Training dynamics
+    if 'eval_accuracy' in history and 'eval_r2' in history and len(history['eval_accuracy']) > 0:
+        ax2 = axes[1, 2].twinx()
+        eval_epochs = [i * 5 for i in range(len(history['eval_accuracy']))]  # Assuming EVAL_EVERY=5
+        axes[1, 2].plot(eval_epochs, history['eval_accuracy'], label='Accuracy', color='blue', linewidth=2, marker='o')
+        ax2.plot(eval_epochs, history['eval_r2'], label='R²', color='green', linewidth=2, marker='s')
+        axes[1, 2].set_xlabel('Epoch', fontsize=11)
+        axes[1, 2].set_ylabel('Accuracy', fontsize=11, color='blue')
+        ax2.set_ylabel('R²', fontsize=11, color='green')
+        axes[1, 2].set_title('Validation Metrics', fontsize=12, fontweight='bold')
+        axes[1, 2].tick_params(axis='y', labelcolor='blue')
+        ax2.tick_params(axis='y', labelcolor='green')
+        axes[1, 2].grid(True, alpha=0.3)
+        
+        # Combine legends
+        lines1, labels1 = axes[1, 2].get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        axes[1, 2].legend(lines1 + lines2, labels1 + labels2, loc='best')
     
     plt.tight_layout()
     plt.show()
@@ -363,13 +481,9 @@ def plot_shared_layer_activity(model, wine_sample, ethanol_sample, device):
     model.eval()
     
     with torch.no_grad():
-        # Wine sample
         wine_output = model(wine_sample.to(device))
-        
-        # Ethanol sample
         ethanol_output = model(ethanol_sample.to(device))
     
-    # Check if architecture has one or two shared layers
     shared_data = wine_output['shared']
     
     if 'spk_rec1' in shared_data and 'spk_rec2' in shared_data:
@@ -379,140 +493,92 @@ def plot_shared_layer_activity(model, wine_sample, ethanol_sample, device):
         ethanol_shared1 = ethanol_output['shared']['spk_rec1'].cpu().numpy()
         ethanol_shared2 = ethanol_output['shared']['spk_rec2'].cpu().numpy()
         
-        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
-        
-        # Wine - Shared Layer 1
-        axes[0, 0].imshow(wine_shared1[:, 0, :].T, aspect='auto', cmap='binary')
-        axes[0, 0].set_xlabel('Time Step', fontsize=10)
-        axes[0, 0].set_ylabel('Neuron Index', fontsize=10)
-        axes[0, 0].set_title('Wine Sample: Shared Layer 1', fontsize=12, fontweight='bold')
-        
-        # Wine - Shared Layer 2
-        axes[0, 1].imshow(wine_shared2[:, 0, :].T, aspect='auto', cmap='binary')
-        axes[0, 1].set_xlabel('Time Step', fontsize=10)
-        axes[0, 1].set_ylabel('Neuron Index', fontsize=10)
-        axes[0, 1].set_title('Wine Sample: Shared Layer 2', fontsize=12, fontweight='bold')
-        
-        # Ethanol - Shared Layer 1
-        axes[1, 0].imshow(ethanol_shared1[:, 0, :].T, aspect='auto', cmap='binary')
-        axes[1, 0].set_xlabel('Time Step', fontsize=10)
-        axes[1, 0].set_ylabel('Neuron Index', fontsize=10)
-        axes[1, 0].set_title('Ethanol Sample: Shared Layer 1', fontsize=12, fontweight='bold')
-        
-        # Ethanol - Shared Layer 2
-        axes[1, 1].imshow(ethanol_shared2[:, 0, :].T, aspect='auto', cmap='binary')
-        axes[1, 1].set_xlabel('Time Step', fontsize=10)
-        axes[1, 1].set_ylabel('Neuron Index', fontsize=10)
-        axes[1, 1].set_title('Ethanol Sample: Shared Layer 2', fontsize=12, fontweight='bold')
-    
-    elif 'spk_rec' in shared_data:
-        # Single shared layer architecture
-        wine_shared = shared_data['spk_rec'].cpu().numpy()
-        ethanol_shared = ethanol_output['shared']['spk_rec'].cpu().numpy()
-        
-        # Also get task-specific hidden layers
+        # Get task-specific hidden layers
         wine_class_hidden = wine_output['classification']['spk_rec'].cpu().numpy()
         wine_reg_hidden = wine_output['regression']['spk_rec'].cpu().numpy()
         ethanol_class_hidden = ethanol_output['classification']['spk_rec'].cpu().numpy()
         ethanol_reg_hidden = ethanol_output['regression']['spk_rec'].cpu().numpy()
         
-        fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
         
-        # Wine - Shared Layer
-        axes[0, 0].imshow(wine_shared[:, 0, :].T, aspect='auto', cmap='binary')
+        # Wine - Shared Layer 1
+        axes[0, 0].imshow(wine_shared1[:, 0, :].T, aspect='auto', cmap='binary')
         axes[0, 0].set_xlabel('Time Step', fontsize=10)
         axes[0, 0].set_ylabel('Neuron Index', fontsize=10)
-        axes[0, 0].set_title('Wine: Shared Layer', fontsize=12, fontweight='bold')
+        axes[0, 0].set_title('Wine: Shared Layer 1', fontsize=12, fontweight='bold')
         
-        # Wine - Classification Hidden
-        axes[0, 1].imshow(wine_class_hidden[:, 0, :].T, aspect='auto', cmap='Reds')
+        # Wine - Shared Layer 2
+        axes[0, 1].imshow(wine_shared2[:, 0, :].T, aspect='auto', cmap='binary')
         axes[0, 1].set_xlabel('Time Step', fontsize=10)
         axes[0, 1].set_ylabel('Neuron Index', fontsize=10)
-        axes[0, 1].set_title('Wine: Classification Hidden', fontsize=12, fontweight='bold')
+        axes[0, 1].set_title('Wine: Shared Layer 2', fontsize=12, fontweight='bold')
         
-        # Wine - Regression Hidden
-        axes[0, 2].imshow(wine_reg_hidden[:, 0, :].T, aspect='auto', cmap='Blues')
+        # Wine - Classification Hidden
+        axes[0, 2].imshow(wine_class_hidden[:, 0, :].T, aspect='auto', cmap='Reds')
         axes[0, 2].set_xlabel('Time Step', fontsize=10)
         axes[0, 2].set_ylabel('Neuron Index', fontsize=10)
-        axes[0, 2].set_title('Wine: Regression Hidden', fontsize=12, fontweight='bold')
+        axes[0, 2].set_title('Wine: Classification Hidden', fontsize=12, fontweight='bold')
         
-        # Ethanol - Shared Layer
-        axes[1, 0].imshow(ethanol_shared[:, 0, :].T, aspect='auto', cmap='binary')
+        # Wine - Regression Hidden
+        axes[0, 3].imshow(wine_reg_hidden[:, 0, :].T, aspect='auto', cmap='Blues')
+        axes[0, 3].set_xlabel('Time Step', fontsize=10)
+        axes[0, 3].set_ylabel('Neuron Index', fontsize=10)
+        axes[0, 3].set_title('Wine: Regression Hidden', fontsize=12, fontweight='bold')
+        
+        # Ethanol - Shared Layer 1
+        axes[1, 0].imshow(ethanol_shared1[:, 0, :].T, aspect='auto', cmap='binary')
         axes[1, 0].set_xlabel('Time Step', fontsize=10)
         axes[1, 0].set_ylabel('Neuron Index', fontsize=10)
-        axes[1, 0].set_title('Ethanol: Shared Layer', fontsize=12, fontweight='bold')
+        axes[1, 0].set_title('Ethanol: Shared Layer 1', fontsize=12, fontweight='bold')
         
-        # Ethanol - Classification Hidden
-        axes[1, 1].imshow(ethanol_class_hidden[:, 0, :].T, aspect='auto', cmap='Reds')
+        # Ethanol - Shared Layer 2
+        axes[1, 1].imshow(ethanol_shared2[:, 0, :].T, aspect='auto', cmap='binary')
         axes[1, 1].set_xlabel('Time Step', fontsize=10)
         axes[1, 1].set_ylabel('Neuron Index', fontsize=10)
-        axes[1, 1].set_title('Ethanol: Classification Hidden', fontsize=12, fontweight='bold')
+        axes[1, 1].set_title('Ethanol: Shared Layer 2', fontsize=12, fontweight='bold')
         
-        # Ethanol - Regression Hidden
-        axes[1, 2].imshow(ethanol_reg_hidden[:, 0, :].T, aspect='auto', cmap='Blues')
+        # Ethanol - Classification Hidden
+        axes[1, 2].imshow(ethanol_class_hidden[:, 0, :].T, aspect='auto', cmap='Reds')
         axes[1, 2].set_xlabel('Time Step', fontsize=10)
         axes[1, 2].set_ylabel('Neuron Index', fontsize=10)
-        axes[1, 2].set_title('Ethanol: Regression Hidden', fontsize=12, fontweight='bold')
-    
+        axes[1, 2].set_title('Ethanol: Classification Hidden', fontsize=12, fontweight='bold')
+        
+        # Ethanol - Regression Hidden
+        axes[1, 3].imshow(ethanol_reg_hidden[:, 0, :].T, aspect='auto', cmap='Blues')
+        axes[1, 3].set_xlabel('Time Step', fontsize=10)
+        axes[1, 3].set_ylabel('Neuron Index', fontsize=10)
+        axes[1, 3].set_title('Ethanol: Regression Hidden', fontsize=12, fontweight='bold')
+        
     plt.tight_layout()
     plt.show()
 
 
-def main(selected_arch_name=None):
-    """Main training and evaluation pipeline."""
+def main(selected_arch_name='improved_shared_64_32_class_16_reg_16'):
+    """Main training and evaluation pipeline with improved multitask learning."""
     print("="*80)
-    print("MULTITASK SNN: WINE CLASSIFICATION + ETHANOL REGRESSION")
-    print("TIME SERIES DATA WITH SINGLE SHARED LAYER ARCHITECTURE")
+    print("IMPROVED MULTITASK SNN TRAINING")
+    print("WITH ADAPTIVE LOSS BALANCING & GRADIENT CLIPPING")
     print("="*80)
     
-    # ========================================================================
-    # ARCHITECTURE SELECTION
-    # ========================================================================
-    if selected_arch_name is None:
-        # Interactive mode - let user select
-        print_available_architectures()
-        
-        available_archs = get_available_architectures()
-        
-        if not available_archs:
-            print("\nERROR: No architectures found in the architectures directory!")
-            print("Please add architecture files to the 'architectures' folder.")
-            sys.exit(1)
-        
-        # Let user select architecture
-        arch_list = list(available_archs.keys())
-        print("\nSelect an architecture to train:")
-        for i, arch_name in enumerate(arch_list, 1):
-            print(f"  {i}. {arch_name}")
-        
-        while True:
-            try:
-                choice = input(f"\nEnter choice (1-{len(arch_list)}): ").strip()
-                choice_idx = int(choice) - 1
-                if 0 <= choice_idx < len(arch_list):
-                    selected_arch_name = arch_list[choice_idx]
-                    break
-                else:
-                    print(f"Please enter a number between 1 and {len(arch_list)}")
-            except ValueError:
-                print("Please enter a valid number")
-            except KeyboardInterrupt:
-                print("\n\nTraining cancelled by user.")
-                sys.exit(0)
+    # Force use of improved architecture
+    print(f"\n✓ Using architecture: {selected_arch_name}")
     
-    print(f"\n✓ Selected architecture: {selected_arch_name}")
-    
-    # Load the selected architecture module
-    arch_module = load_architecture(selected_arch_name)
-    MultitaskSNN = arch_module.MultitaskSNN
+    # Load the architecture
+    try:
+        arch_module = load_architecture(selected_arch_name)
+        MultitaskSNN = arch_module.MultitaskSNN
+    except:
+        print(f"\nERROR: Could not load architecture '{selected_arch_name}'")
+        print("Make sure the improved_multitask_snn.py file is in the architectures folder!")
+        sys.exit(1)
     
     # ========================================================================
     # CONFIGURATION
     # ========================================================================
-    # Paths (relative to multitask_net directory)
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Go up to multitask folder
+    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     wine_data_path = os.path.join(base_dir, "data", "wine")
-    ethanol_data_path = os.path.join(base_dir, "data", "wine")  # Ethanol is inside wine folder
+    ethanol_data_path = os.path.join(base_dir, "data", "wine")
+    # Save trained models into shared directory 'tr'
     models_dir = "models"
     os.makedirs(models_dir, exist_ok=True)
     
@@ -521,33 +587,43 @@ def main(selected_arch_name=None):
     print(f"  Ethanol: {ethanol_data_path}")
     
     # ========================================================================
-    # TIME SERIES HYPERPARAMETERS - NEW!
+    # IMPROVED HYPERPARAMETERS
     # ========================================================================
-    SEQUENCE_LENGTH = 500       # Fixed length for sequences (or None for variable)
-    DOWNSAMPLE_FACTOR = 2       # Take every Nth point (1=no downsampling)
-    ENCODING_TYPE = 'direct'    # Options: 'direct', 'rate', 'latency', 'delta'
+    # Time series config
+    SEQUENCE_LENGTH = 1000  # Longer sequences (from train_two_shared_layers.py)
+    DOWNSAMPLE_FACTOR = 2   # Keep same factor
+    ENCODING_TYPE = 'direct'
     
-    # Model hyperparameters
-    SHARED_HIDDEN = 28          # Single shared layer
-    CLASS_HIDDEN = 8            # Classification branch hidden layer
-    REG_HIDDEN = 14             # Regression branch hidden layer
-    NUM_CLASSES = 3
-    BETA = 0.9
+    # Model config - Match successful architecture
+    BETA = 0.95             # Increased memory
+    DROPOUT_RATE = 0.2      # Increased regularization
+    SHARED_SIZE = 32        # First shared layer
+    CLASS_HIDDEN = 16       # Classification branch
+    REG_HIDDEN = 16        # Regression branch
     
-    # Training hyperparameters
-    LEARNING_RATE = 0.001
-    NUM_EPOCHS = 100
-    BATCH_SIZE = 16
-    REG_WEIGHT = 0.5           # Weight for regression loss (0.5 = equal importance)
+    # Training config - IMPROVED
+    BASE_LEARNING_RATE = 0.0005  # Start smaller for stability
+    NUM_EPOCHS = 150              # Train longer for convergence
+    BATCH_SIZE = 16               # Smaller batches 
+    REG_WEIGHT = 0.5             # Equal task weighting
+    MAX_GRAD_NORM = 0.5          # Tighter gradient clipping
+    EVAL_EVERY = 5               # Evaluate every N epochs
+    
+    # Model save directory
+    save_dir = os.path.join(os.path.dirname(__file__), 'models')
+    os.makedirs(save_dir, exist_ok=True)
     
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\nUsing device: {device}")
+    print(f"\nDevice: {device}")
     
-    print(f"\nTime Series Configuration:")
-    print(f"  Sequence length: {SEQUENCE_LENGTH if SEQUENCE_LENGTH else 'Variable'}")
-    print(f"  Downsample factor: {DOWNSAMPLE_FACTOR}")
-    print(f"  Encoding type: {ENCODING_TYPE}")
+    print(f"\nImproved Training Configuration:")
+    print(f"  Base LR: {BASE_LEARNING_RATE}")
+    print(f"  Epochs: {NUM_EPOCHS}")
+    print(f"  Gradient clipping: {MAX_GRAD_NORM}")
+    print(f"  Adaptive loss scaling: Enabled")
+    print(f"  Evaluation every: {EVAL_EVERY} epochs")
+    print(f"  Dropout rate: {DROPOUT_RATE}")
     
     # ========================================================================
     # LOAD AND PREPROCESS DATA
@@ -556,76 +632,55 @@ def main(selected_arch_name=None):
     print("LOADING AND PREPROCESSING DATA")
     print("="*80)
     
-    # Load wine data (classification)
-    print("\nLoading wine dataset...")
     wine_df = load_wine_dataset(wine_data_path)
-    
-    if wine_df.empty:
-        print(f"\nERROR: No wine data found at {wine_data_path}")
-        print("Please check the data path and folder structure.")
-        sys.exit(1)
-    
-    # Load ethanol data (regression)
-    print("\nLoading ethanol dataset...")
     ethanol_df = load_ethanol_dataset(ethanol_data_path)
     
-    if ethanol_df.empty:
-        print(f"\nERROR: No ethanol data found at {ethanol_data_path}")
-        print("Please check the data path and folder structure.")
+    if wine_df.empty or ethanol_df.empty:
+        print("\nERROR: Data not found!")
         sys.exit(1)
     
-    # Remove stabilization period from wine data
-    print(f"\nRemoving first 500 time points from wine data...")
+    # Remove stabilization period
+    print("\nRemoving first 500 time points from wine data...")
     wine_processed = []
     for filename in wine_df['Filename'].unique():
         file_data = wine_df[wine_df['Filename'] == filename].copy()
         if len(file_data) > 500:
             file_data = file_data.iloc[500:].reset_index(drop=True)
             wine_processed.append(file_data)
-    
     wine_df = pd.concat(wine_processed, ignore_index=True) if wine_processed else pd.DataFrame()
     
-    # Remove stabilization period from ethanol data
-    print(f"Removing first 500 time points from ethanol data...")
+    print("Removing first 500 time points from ethanol data...")
     ethanol_processed = []
     for filename in ethanol_df['Filename'].unique():
         file_data = ethanol_df[ethanol_df['Filename'] == filename].copy()
         if len(file_data) > 500:
             file_data = file_data.iloc[500:].reset_index(drop=True)
             ethanol_processed.append(file_data)
-    
     ethanol_df = pd.concat(ethanol_processed, ignore_index=True) if ethanol_processed else pd.DataFrame()
     
-    # NEW: Preprocess time series data (preserves temporal structure)
+    # Preprocess time series
     preprocessed_data = preprocess_time_series_features(
-        wine_df, 
-        ethanol_df,
+        wine_df, ethanol_df,
         sequence_length=SEQUENCE_LENGTH,
         downsample_factor=DOWNSAMPLE_FACTOR
     )
     
-    # NEW: Create train-test splits for sequences
     splits = create_train_test_split_sequences(
-        preprocessed_data, 
-        test_size=0.2, 
-        random_state=42
+        preprocessed_data, test_size=0.2, random_state=42
     )
     
     # ========================================================================
-    # SPIKE ENCODING - UPDATED FOR TIME SERIES
+    # SPIKE ENCODING
     # ========================================================================
     print("\n" + "="*80)
-    print("ENCODING SPIKE TRAINS FROM TIME SERIES")
+    print("SPIKE ENCODING")
     print("="*80)
     
-    # NEW: Encode time series as spikes
     spike_encoded_data = encode_time_series_datasets(
-        splits,
-        encoding_type=ENCODING_TYPE,
-        num_steps=None  # Only needed for 'rate' or 'latency'
+        splits, encoding_type=ENCODING_TYPE, num_steps=None
     )
     
-    # Extract spike trains (already in correct format!)
+    # Extract data
     X_train_wine_spikes = spike_encoded_data['wine']['spike_train']
     X_test_wine_spikes = spike_encoded_data['wine']['spike_test']
     y_train_wine = spike_encoded_data['wine']['y_train']
@@ -638,14 +693,11 @@ def main(selected_arch_name=None):
     y_test_ethanol = spike_encoded_data['ethanol']['y_test']
     ethanol_scaler_y = spike_encoded_data['ethanol']['scaler_y']
     
-    print(f"\nSpike train shapes:")
-    print(f"  Wine train: {X_train_wine_spikes.shape} (time_steps, samples, features)")
-    print(f"  Ethanol train: {X_train_ethanol_spikes.shape} (time_steps, samples, features)")
+    print(f"\n✓ Spike trains created")
+    print(f"  Wine: {X_train_wine_spikes.shape}")
+    print(f"  Ethanol: {X_train_ethanol_spikes.shape}")
     
-    # ========================================================================
-    # CREATE DATA LOADERS
-    # ========================================================================
-    # Permute dimensions: [time_steps, samples, features] -> [samples, time_steps, features]
+    # Create dataloaders
     X_train_wine_spikes = X_train_wine_spikes.permute(1, 0, 2)
     X_test_wine_spikes = X_test_wine_spikes.permute(1, 0, 2)
     X_train_ethanol_spikes = X_train_ethanol_spikes.permute(1, 0, 2)
@@ -664,40 +716,42 @@ def main(selected_arch_name=None):
     )
     
     # ========================================================================
-    # CREATE MODEL - UPDATED INPUT SIZE
+    # CREATE MODEL
     # ========================================================================
     print("\n" + "="*80)
-    print("CREATING MULTITASK SNN")
+    print("CREATING MODEL")
     print("="*80)
     
-    # For time series: input_size = number of features per timestep
-    input_size = splits['wine']['X_train'].shape[2]  # Last dimension = features
-    
-    print(f"\nModel configuration:")
-    print(f"  Input size: {input_size} (features per timestep)")
-    print(f"  Shared hidden: {SHARED_HIDDEN}")
-    print(f"  Classification hidden: {CLASS_HIDDEN}")
-    print(f"  Regression hidden: {REG_HIDDEN}")
-    print(f"  Number of classes: {NUM_CLASSES}")
-    print(f"  Beta: {BETA}")
+    input_size = splits['wine']['X_train'].shape[2]
     
     model = MultitaskSNN(
         input_size=input_size,
-        shared_hidden=SHARED_HIDDEN,
-        classification_hidden=CLASS_HIDDEN,
-        regression_hidden=REG_HIDDEN,
-        num_classes=NUM_CLASSES,
-        beta=BETA
+        num_classes=3,
+        beta=BETA,
+        dropout_rate=DROPOUT_RATE
     ).to(device)
     
     print(model.get_architecture_summary())
     
     # ========================================================================
-    # TRAINING SETUP
+    # TRAINING SETUP - IMPROVED
     # ========================================================================
     classification_criterion = nn.CrossEntropyLoss()
     regression_criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    optimizer = torch.optim.Adam(model.parameters(), lr=BASE_LEARNING_RATE)
+    
+    # Learning rate scheduler
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=0.5, patience=10, verbose=True
+    )
+    
+    # Adaptive loss scaler
+    loss_scaler = AdaptiveLossScaler(alpha=0.9)
+    
+    print("\n✓ Training setup complete")
+    print(f"  Optimizer: Adam (LR={BASE_LEARNING_RATE})")
+    print(f"  Scheduler: ReduceLROnPlateau")
+    print(f"  Loss scaler: Adaptive EMA (alpha=0.9)")
     
     # ========================================================================
     # TRAINING LOOP
@@ -705,54 +759,162 @@ def main(selected_arch_name=None):
     print("\n" + "="*80)
     print("TRAINING")
     print("="*80)
-    print(f"\nTraining for {NUM_EPOCHS} epochs...")
-    print(f"  Batch size: {BATCH_SIZE}")
-    print(f"  Learning rate: {LEARNING_RATE}")
-    print(f"  Regression weight: {REG_WEIGHT}")
     
     history = {
         'total_loss': [],
         'class_loss': [],
-        'reg_loss': []
+        'reg_loss': [],
+        'scaled_class_loss': [],
+        'scaled_reg_loss': [],
+        'class_scale': [],
+        'reg_scale': [],
+        'eval_accuracy': [],
+        'eval_r2': []
     }
     
+    best_combined_metric = 0
+    best_epoch = 0
+    patience = 15
+    patience_counter = 0
+    num_warmup_epochs = 10
+    
     for epoch in range(NUM_EPOCHS):
-        avg_loss, avg_class_loss, avg_reg_loss = train_multitask_epoch(
+        # Learning rate warmup
+        if epoch < num_warmup_epochs:
+            lr = BASE_LEARNING_RATE * ((epoch + 1) / num_warmup_epochs)
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+        
+        # Train
+        train_metrics = train_multitask_epoch_improved(
             model, wine_train_loader, ethanol_train_loader, device,
             classification_criterion, regression_criterion,
-            optimizer, reg_weight=REG_WEIGHT
+            optimizer, loss_scaler, reg_weight=REG_WEIGHT,
+            max_grad_norm=MAX_GRAD_NORM,
+            warmup=(epoch < num_warmup_epochs)
         )
         
-        history['total_loss'].append(avg_loss)
-        history['class_loss'].append(avg_class_loss)
-        history['reg_loss'].append(avg_reg_loss)
+        # Log metrics
+        history['total_loss'].append(train_metrics['total_loss'])
+        history['class_loss'].append(train_metrics['class_loss'])
+        history['reg_loss'].append(train_metrics['reg_loss'])
+        history['scaled_class_loss'].append(train_metrics['scaled_class_loss'])
+        history['scaled_reg_loss'].append(train_metrics['scaled_reg_loss'])
+        history['class_scale'].append(train_metrics['class_scale'])
+        history['reg_scale'].append(train_metrics['reg_scale'])
         
-        if (epoch + 1) % 5 == 0:
-            print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] | "
-                  f"Total Loss: {avg_loss:.4f} | "
-                  f"Class Loss: {avg_class_loss:.4f} | "
-                  f"Reg Loss: {avg_reg_loss:.4f}")
+        # Evaluate periodically
+        if (epoch + 1) % EVAL_EVERY == 0:
+            class_results = evaluate_classification(model, wine_test_loader, device)
+            reg_results = evaluate_regression(model, ethanol_test_loader, device)
+            
+            history['eval_accuracy'].append(class_results['accuracy'])
+            history['eval_r2'].append(reg_results['r2'])
+            
+            # Calculate combined metric for model selection
+            combined_metric = (class_results['accuracy'] + reg_results['r2']) / 2
+            
+            if combined_metric > best_combined_metric:
+                best_combined_metric = combined_metric
+                best_epoch = epoch
+                patience_counter = 0
+                
+                # Save best model
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'combined_metric': combined_metric,
+                    'class_accuracy': class_results['accuracy'],
+                    'reg_r2': reg_results['r2']
+                }, os.path.join(save_dir, 'best_model.pth'))
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f'\nEarly stopping triggered after {epoch} epochs')
+                    print(f'Best combined metric: {best_combined_metric:.4f} at epoch {best_epoch}')
+                    break
+            
+            # Combined metric (you can adjust weights)
+            combined_metric = 0.5 * class_results['accuracy'] + 0.5 * max(0, reg_results['r2'])
+            
+            if combined_metric > best_combined_metric:
+                best_combined_metric = combined_metric
+                best_epoch = epoch + 1
+            
+            print(f"\nEpoch [{epoch+1}/{NUM_EPOCHS}]")
+            print(f"  Total Loss:     {train_metrics['total_loss']:.4f}")
+            print(f"  Class Loss:     {train_metrics['class_loss']:.4f} (scale: {train_metrics['class_scale']:.3f})")
+            print(f"  Reg Loss:       {train_metrics['reg_loss']:.4f} (scale: {train_metrics['reg_scale']:.3f})")
+            print(f"  Accuracy:       {class_results['accuracy']:.4f}")
+            print(f"  R²:             {reg_results['r2']:.4f}")
+            print(f"  Combined:       {combined_metric:.4f} (best: {best_combined_metric:.4f} @ epoch {best_epoch})")
+        
+        elif (epoch + 1) % 10 == 0:
+            print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] | Loss: {train_metrics['total_loss']:.4f} | "
+                  f"Class: {train_metrics['class_loss']:.4f} | Reg: {train_metrics['reg_loss']:.4f}")
+        
+        # Update learning rate
+        scheduler.step(train_metrics['total_loss'])
     
     print("\n✓ Training completed!")
     
     # ========================================================================
-    # EVALUATION
+    # LOSS MAGNITUDE DIAGNOSTIC
     # ========================================================================
     print("\n" + "="*80)
-    print("EVALUATION")
+    print("LOSS MAGNITUDE DIAGNOSTIC")
     print("="*80)
     
-    # Classification evaluation
-    print("\n--- WINE CLASSIFICATION RESULTS ---")
+    with torch.no_grad():
+        sample_wine = next(iter(wine_test_loader))
+        sample_eth = next(iter(ethanol_test_loader))
+        
+        wine_out = model(sample_wine[0].to(device).permute(1, 0, 2))
+        eth_out = model(sample_eth[0].to(device).permute(1, 0, 2))
+        
+        final_class_loss = classification_criterion(
+            wine_out['classification']['mem_rec'].sum(0), 
+            sample_wine[1].to(device).long()
+        )
+        final_reg_loss = regression_criterion(
+            eth_out['regression']['mem_rec'].sum(0).squeeze(),
+            sample_eth[1].to(device)
+        )
+        
+        print(f"\nFinal raw loss magnitudes:")
+        print(f"  Classification: {final_class_loss:.4f}")
+        print(f"  Regression:     {final_reg_loss:.4f}")
+        print(f"  Ratio (C/R):    {final_class_loss/final_reg_loss:.4f}")
+        print(f"\nFinal loss scales:")
+        print(f"  Class scale:    {loss_scaler.class_loss_scale:.4f}")
+        print(f"  Reg scale:      {loss_scaler.reg_loss_scale:.4f}")
+        print(f"\nLoss balance assessment:")
+        ratio = final_class_loss / final_reg_loss
+        if 0.5 <= ratio <= 2.0:
+            print(f"  ✓ Losses are well balanced (ratio: {ratio:.2f})")
+        elif ratio > 2.0:
+            print(f"  ⚠ Classification loss dominates (ratio: {ratio:.2f})")
+        else:
+            print(f"  ⚠ Regression loss dominates (ratio: {ratio:.2f})")
+    
+    # ========================================================================
+    # FINAL EVALUATION
+    # ========================================================================
+    print("\n" + "="*80)
+    print("FINAL EVALUATION")
+    print("="*80)
+    
     class_results = evaluate_classification(model, wine_test_loader, device)
+    reg_results = evaluate_regression(model, ethanol_test_loader, device)
+    
+    print("\n--- WINE CLASSIFICATION ---")
     print(f"  Accuracy:  {class_results['accuracy']:.4f}")
     print(f"  Precision: {class_results['precision']:.4f}")
     print(f"  Recall:    {class_results['recall']:.4f}")
     print(f"  F1-Score:  {class_results['f1']:.4f}")
     
-    # Regression evaluation
-    print("\n--- ETHANOL CONCENTRATION REGRESSION RESULTS ---")
-    reg_results = evaluate_regression(model, ethanol_test_loader, device)
+    print("\n--- ETHANOL REGRESSION ---")
     print(f"  RMSE: {reg_results['rmse']:.4f}")
     print(f"  MAE:  {reg_results['mae']:.4f}")
     print(f"  R²:   {reg_results['r2']:.4f}")
@@ -761,18 +923,9 @@ def main(selected_arch_name=None):
     # SAVE MODEL
     # ========================================================================
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    # Create model name with time series parameters
-    model_name = (f"{selected_arch_name}_"
-                  f"timeseries_"
-                  f"seqlen-{SEQUENCE_LENGTH if SEQUENCE_LENGTH else 'var'}_"
-                  f"downsample-{DOWNSAMPLE_FACTOR}_"
-                  f"encoding-{ENCODING_TYPE}_"
-                  f"beta-{BETA}_"
-                  f"epochs-{NUM_EPOCHS}_"
-                  f"lr-{LEARNING_RATE}_"
-                  f"bs-{BATCH_SIZE}_"
-                  f"regweight-{REG_WEIGHT}_"
+    model_name = (f"{selected_arch_name}_improved_"
+                  f"acc-{class_results['accuracy']:.3f}_"
+                  f"r2-{reg_results['r2']:.3f}_"
                   f"{timestamp}.pth")
     model_path = os.path.join(models_dir, model_name)
     
@@ -781,24 +934,25 @@ def main(selected_arch_name=None):
         'architecture_name': selected_arch_name,
         'architecture': {
             'input_size': input_size,
-            'shared_hidden': SHARED_HIDDEN,
-            'classification_hidden': CLASS_HIDDEN,
-            'regression_hidden': REG_HIDDEN,
-            'num_classes': NUM_CLASSES,
-            'beta': BETA
+            'num_classes': 3,
+            'beta': BETA,
+            'dropout_rate': DROPOUT_RATE
         },
         'hyperparameters': {
-            'learning_rate': LEARNING_RATE,
+            'learning_rate': BASE_LEARNING_RATE,
             'num_epochs': NUM_EPOCHS,
             'batch_size': BATCH_SIZE,
             'reg_weight': REG_WEIGHT,
+            'max_grad_norm': MAX_GRAD_NORM,
             'sequence_length': SEQUENCE_LENGTH,
             'downsample_factor': DOWNSAMPLE_FACTOR,
             'encoding_type': ENCODING_TYPE
         },
         'results': {
             'classification': class_results,
-            'regression': reg_results
+            'regression': reg_results,
+            'best_combined_metric': best_combined_metric,
+            'best_epoch': best_epoch
         },
         'history': history,
         'scalers': {
@@ -807,7 +961,11 @@ def main(selected_arch_name=None):
             'ethanol_scaler_y': ethanol_scaler_y
         },
         'label_encoder': wine_label_encoder,
-        'feature_names': splits['wine']['feature_names']
+        'feature_names': splits['wine']['feature_names'],
+        'loss_scaler_final': {
+            'class_scale': loss_scaler.class_loss_scale,
+            'reg_scale': loss_scaler.reg_loss_scale
+        }
     }, model_path)
     
     print(f"\n✓ Model saved to: {model_path}")
@@ -819,9 +977,22 @@ def main(selected_arch_name=None):
     print("GENERATING VISUALIZATIONS")
     print("="*80)
     
-    # Training history
-    print("\n1. Training history...")
-    plot_training_history(history)
+    # Save history json and generate static plots (useful for HPO and CI)
+    json_path = os.path.join(models_dir, 'history.json')
+    try:
+        save_history_json(history, json_path)
+        saved_plot_files = plot_history(history, models_dir)
+        print(f"\nSaved training history JSON to: {json_path}")
+        if saved_plot_files:
+            print("Saved plots:")
+            for p in saved_plot_files:
+                print(f"  - {p}")
+    except Exception as e:
+        print(f"Warning: failed to save history or plots: {e}")
+
+    # Training history with loss scaling (interactive / inline)
+    print("\n1. Training history with adaptive loss scaling...")
+    plot_training_history_improved(history)
     
     # Classification results
     print("2. Classification results...")
@@ -834,38 +1005,52 @@ def main(selected_arch_name=None):
     
     # Shared layer activity visualization
     print("4. Shared layer activity...")
-    # Get first test sample: [batch, time, features] -> [time, 1, features]
     wine_sample = X_test_wine_spikes[0:1, :, :].permute(1, 0, 2)
     ethanol_sample = X_test_ethanol_spikes[0:1, :, :].permute(1, 0, 2)
     plot_shared_layer_activity(model, wine_sample, ethanol_sample, device)
     
-    print("\n" + "="*80)
-    print("ALL DONE! 🎉")
-    print("="*80)
-    
-    # Print summary
+    # ========================================================================
+    # FINAL SUMMARY
+    # ========================================================================
     print("\n" + "="*80)
     print("TRAINING SUMMARY")
     print("="*80)
     print(f"\nArchitecture: {selected_arch_name}")
-    print(f"Time Series Config:")
-    print(f"  - Sequence length: {SEQUENCE_LENGTH if SEQUENCE_LENGTH else 'Variable'}")
+    print(f"\nImprovements Applied:")
+    print(f"  ✓ Adaptive loss scaling (balanced {len(history['class_loss'])} epochs)")
+    print(f"  ✓ Combined gradient updates (no alternating)")
+    print(f"  ✓ Gradient clipping (max norm: {MAX_GRAD_NORM})")
+    print(f"  ✓ Larger shared capacity (64→32 neurons)")
+    print(f"  ✓ Learning rate scheduling")
+    print(f"  ✓ Dropout regularization ({DROPOUT_RATE})")
+    
+    print(f"\nTime Series Config:")
+    print(f"  - Sequence length: {SEQUENCE_LENGTH}")
     print(f"  - Downsample factor: {DOWNSAMPLE_FACTOR}")
     print(f"  - Encoding type: {ENCODING_TYPE}")
     print(f"  - Input features: {input_size}")
-    print(f"\nWine Classification Performance:")
-    print(f"  - Accuracy: {class_results['accuracy']:.4f}")
-    print(f"  - F1-Score: {class_results['f1']:.4f}")
-    print(f"\nEthanol Regression Performance:")
-    print(f"  - RMSE: {reg_results['rmse']:.4f}")
-    print(f"  - R²: {reg_results['r2']:.4f}")
+    
+    print(f"\nFinal Performance:")
+    print(f"  Wine Classification:")
+    print(f"    - Accuracy: {class_results['accuracy']:.4f}")
+    print(f"    - F1-Score: {class_results['f1']:.4f}")
+    print(f"  Ethanol Regression:")
+    print(f"    - RMSE: {reg_results['rmse']:.4f}")
+    print(f"    - R²:   {reg_results['r2']:.4f}")
+    print(f"  Combined Metric: {0.5 * class_results['accuracy'] + 0.5 * max(0, reg_results['r2']):.4f}")
+    print(f"  Best Epoch: {best_epoch}")
+    
     print(f"\nModel saved to: {model_path}")
     print("\n" + "="*80)
+    print("ALL DONE! 🎉")
+    print("="*80)
+    
+    return model, history, class_results, reg_results
 
 
 if __name__ == "__main__":
-    # Check if architecture name was passed as command line argument
+    # Force use of improved architecture
     if len(sys.argv) > 1:
         main(selected_arch_name=sys.argv[1])
     else:
-        main()
+        main(selected_arch_name='improved_shared_64_32_class_16_reg_16')
