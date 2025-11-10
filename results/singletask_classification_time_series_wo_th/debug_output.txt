@@ -1,0 +1,260 @@
+Using device: cuda
+
+================================================================================
+PART 1: LOADING WINE TIME-SERIES DATASET (GAS SENSORS ONLY)
+================================================================================
+Loading data from: data/wine
+Processing folder: AQ_Wines...
+Processing folder: HQ_Wines...
+Processing folder: LQ_Wines...
+
+Total rows loaded: 782550
+
+Dataset shape: (782550, 12)
+Unique files: 235
+
+--------------------------------------------------------------------------------
+1.1 Removing Stabilization Period
+--------------------------------------------------------------------------------
+
+Dataset shape after removing stabilization: (665050, 12)
+
+--------------------------------------------------------------------------------
+1.2 Preparing Time Series Sequences
+--------------------------------------------------------------------------------
+
+Time series configuration:
+  Sequence length: 500
+  Downsample factor: 2
+  Features: 6 (gas sensors only)
+
+Total sequences: 235
+Sequence shape: (500, 6) (timesteps, features)
+
+--------------------------------------------------------------------------------
+1.3 Cleaning and Normalizing Time Series
+--------------------------------------------------------------------------------
+
+Normalized range: [0.000, 1.000]
+
+--------------------------------------------------------------------------------
+1.4 Encoding Labels
+--------------------------------------------------------------------------------
+
+Label distribution:
+  AQ: 43 samples (encoded as 0)
+  HQ: 51 samples (encoded as 1)
+  LQ: 141 samples (encoded as 2)
+
+--------------------------------------------------------------------------------
+1.5 Creating Fixed-Size Arrays
+--------------------------------------------------------------------------------
+
+Final data shape: (235, 500, 6) (samples, timesteps, features)
+
+--------------------------------------------------------------------------------
+1.6 Train-Test Split
+--------------------------------------------------------------------------------
+
+Training set: 188 samples
+Test set: 47 samples
+
+Training label distribution:
+  AQ: 34 samples
+  HQ: 41 samples
+  LQ: 113 samples
+
+================================================================================
+PART 2: SPIKE ENCODING TIME SERIES DATA
+================================================================================
+
+ENCODING STRATEGY: DIRECT TIME SERIES TO SPIKES
+------------------------------------------------
+Instead of using latency encoding on aggregated features, we:
+1. Use the time series directly
+2. Convert normalized values to binary spikes (threshold-based)
+3. Preserve temporal dynamics
+
+Each timestep in the original sequence becomes one SNN timestep.
+Values above threshold (0.5) → spike (1), below → no spike (0)
+
+
+Encoding type: direct
+
+Encoding training data:
+  Encoding 188 sequences...
+  Spike data shape: torch.Size([500, 188, 6]) (timesteps, samples, features)
+  Total spikes: 40,184
+  Spike rate: 0.0712
+  Sparsity: 0.9288
+
+Encoding test data:
+  Encoding 47 sequences...
+  Spike data shape: torch.Size([500, 47, 6]) (timesteps, samples, features)
+  Total spikes: 9,798
+  Spike rate: 0.0695
+  Sparsity: 0.9305
+
+✓ Spike encoding completed!
+
+================================================================================
+PART 3: DESIGNING SNN ARCHITECTURE FOR TIME SERIES
+================================================================================
+
+--------------------------------------------------------------------------------
+3.1 Model Instantiation
+--------------------------------------------------------------------------------
+
+Model configuration:
+  Input size: 6 (features per timestep)
+  Hidden layer 1: 28 neurons
+  Hidden layer 2: 8 neurons
+  Output size: 3 classes
+  Beta: 0.9
+  Timesteps: 500
+
+Model created on cuda
+TimeSeriesWineSNN(
+  (fc1): Linear(in_features=6, out_features=28, bias=True)
+  (fc2): Linear(in_features=28, out_features=8, bias=True)
+  (fc3): Linear(in_features=8, out_features=3, bias=True)
+  (lif1): Leaky()
+  (lif2): Leaky()
+  (lif3): Leaky()
+)
+
+Total parameters: 455
+
+================================================================================
+PART 4: TRAINING TIME SERIES SNN
+================================================================================
+
+Training configuration:
+  Epochs: 100
+  Batch size: 16
+  Learning rate: 0.001
+
+Train batches: 12
+Test batches: 3
+
+--------------------------------------------------------------------------------
+4.1 Training Loop
+--------------------------------------------------------------------------------
+
+Starting training...
+--------------------------------------------------------------------------------
+Epoch [  1/100] | Train Loss: 332.1400 | Test Loss: 336.0553 | Train Acc: 71.81% | Test Acc: 72.34% | F1: 0.6409
+Epoch [ 10/100] | Train Loss: 69.8472 | Test Loss: 93.6529 | Train Acc: 75.53% | Test Acc: 80.85% | F1: 0.7974
+Epoch [ 20/100] | Train Loss: 11.9836 | Test Loss: 10.3566 | Train Acc: 74.47% | Test Acc: 85.11% | F1: 0.8436
+Epoch [ 30/100] | Train Loss: 1.1249 | Test Loss: 1.4681 | Train Acc: 78.72% | Test Acc: 91.49% | F1: 0.9049
+Epoch [ 40/100] | Train Loss: 1.2065 | Test Loss: 1.2138 | Train Acc: 84.57% | Test Acc: 85.11% | F1: 0.8124
+Epoch [ 50/100] | Train Loss: 3.1487 | Test Loss: 0.8328 | Train Acc: 82.98% | Test Acc: 82.98% | F1: 0.8359
+Epoch [ 60/100] | Train Loss: 1.0406 | Test Loss: 0.4978 | Train Acc: 90.43% | Test Acc: 93.62% | F1: 0.9314
+Epoch [ 70/100] | Train Loss: 1.2298 | Test Loss: 1.6576 | Train Acc: 87.77% | Test Acc: 93.62% | F1: 0.9314
+Epoch [ 80/100] | Train Loss: 0.5584 | Test Loss: 0.6239 | Train Acc: 86.17% | Test Acc: 93.62% | F1: 0.9314
+Epoch [ 90/100] | Train Loss: 0.4481 | Test Loss: 0.4786 | Train Acc: 89.36% | Test Acc: 91.49% | F1: 0.9110
+Epoch [100/100] | Train Loss: 0.5483 | Test Loss: 0.5377 | Train Acc: 90.96% | Test Acc: 93.62% | F1: 0.9314
+
+✓ Training completed!
+
+--------------------------------------------------------------------------------
+4.2 Training History
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+4.3 Final Model Evaluation
+--------------------------------------------------------------------------------
+
+================================================================================
+FINAL PERFORMANCE
+================================================================================
+
+Accuracy: 93.62%
+F1 Score: 0.9314
+
+
+Classification Report:
+--------------------------------------------------------------------------------
+              precision    recall  f1-score   support
+
+          AQ       1.00      0.67      0.80         9
+          HQ       1.00      1.00      1.00        10
+          LQ       0.90      1.00      0.95        28
+
+    accuracy                           0.94        47
+   macro avg       0.97      0.89      0.92        47
+weighted avg       0.94      0.94      0.93        47
+
+
+--------------------------------------------------------------------------------
+4.4 Spiking Activity Analysis
+--------------------------------------------------------------------------------
+
+Spike rates:
+  Hidden Layer 1: 0.0949
+  Hidden Layer 2: 0.0616
+
+================================================================================
+TIME SERIES SNN (SENSORS ONLY) - FINAL SUMMARY
+================================================================================
+
+✓ COMPLETED TIME SERIES WINE CLASSIFICATION USING GAS SENSORS ONLY!
+
+KEY DIFFERENCES FROM FULL FEATURE SET:
+======================================
+1. DATA REPRESENTATION:
+   - Using 6 MQ sensor channels per timestep (temperature/humidity removed)
+   - 500 timesteps per sample preserved
+
+2. SPIKE ENCODING:
+   - Direct threshold encoding on sensor-only sequences
+
+3. SNN PROCESSING:
+   - 500 SNN timesteps with input size 6
+
+RESULTS:
+========
+- Final Accuracy: 93.62%
+- F1 Score: 0.9314
+- Training samples: 188
+- Test samples: 47
+- Hidden layers: [28, 8]
+- Output classes: 3
+- Encoding type: direct
+- Beta: 0.9
+- Learning rate: 0.001
+- Epochs: 100
+- Batch size: 16
+
+
+--------------------------------------------------------------------------------
+SAVING TRAINED MODEL
+--------------------------------------------------------------------------------
+
+✓ Model saved successfully at: trained_models\wine_timeseries_snn_wo_th_seq500_beta0.9_bs16_lr0.001_ep100.pth
+
+================================================================================
+EXPERIMENT COMPLETED SUCCESSFULLY ✅ (SENSORS ONLY)
+================================================================================
+
+Summary:
+---------
+Model Type       : Spiking Neural Network (Leaky Integrate-and-Fire)
+Dataset          : Wine Quality Time-Series (gas sensors)
+Timesteps        : 500
+Features         : 6
+Encoding Type    : direct
+Optimizer        : Adam (lr=0.001)
+Training Epochs  : 100
+Final Accuracy   : 93.62%
+Final F1 Score   : 0.9314
+Model Path       : trained_models\wine_timeseries_snn_wo_th_seq500_beta0.9_bs16_lr0.001_ep100.pth
+
+Next Steps:
+-----------
+- Compare against full-feature model including environmental sensors
+- Evaluate robustness across different downsampling factors
+- Explore recurrent SNN variants for longer temporal dependencies
+- Investigate explainability differences using TSA on sensor-only data
+
+✓ All tasks completed.

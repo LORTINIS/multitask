@@ -1,0 +1,177 @@
+Using device: cuda
+
+================================================================================
+PART 1: LOADING WINE TIME-SERIES DATASET
+================================================================================
+Loading data from: data/wine
+Processing folder: AQ_Wines...
+Processing folder: HQ_Wines...
+Processing folder: LQ_Wines...
+
+Total rows loaded: 782550
+
+Dataset shape: (782550, 14)
+Unique files: 235
+
+--------------------------------------------------------------------------------
+1.1 Removing Stabilisation Period
+--------------------------------------------------------------------------------
+
+Dataset shape after removing stabilisation: (665050, 14)
+
+--------------------------------------------------------------------------------
+1.2 Preparing Time Series Sequences
+--------------------------------------------------------------------------------
+
+Total sequences: 235
+Sequence shape: (500, 8) (timesteps, features)
+
+--------------------------------------------------------------------------------
+1.3 Cleaning and Normalising Time Series
+--------------------------------------------------------------------------------
+
+Normalised range: [0.000, 1.000]
+
+--------------------------------------------------------------------------------
+1.4 Encoding Labels
+--------------------------------------------------------------------------------
+
+Label distribution:
+  AQ: 43 samples
+  HQ: 51 samples
+  LQ: 141 samples
+
+--------------------------------------------------------------------------------
+1.5 Train-Test Split
+--------------------------------------------------------------------------------
+
+Training set: 188 samples
+Test set: 47 samples
+
+================================================================================
+PART 2: SPIKE ENCODING
+================================================================================
+Training spike tensor shape: torch.Size([500, 188, 8])
+Test spike tensor shape: torch.Size([500, 47, 8])
+
+================================================================================
+PART 3: MODEL SETUP
+================================================================================
+TimeSeriesWineSNN(
+  (fc1): Linear(in_features=8, out_features=28, bias=True)
+  (fc2): Linear(in_features=28, out_features=8, bias=True)
+  (fc3): Linear(in_features=8, out_features=3, bias=True)
+  (lif1): Leaky()
+  (lif2): Leaky()
+  (lif3): Leaky()
+)
+Total parameters: 511
+
+================================================================================
+PART 4: TRAINING
+================================================================================
+Epoch [  1/50] | Train Loss: 155.6162 | Test Loss: 120.4456 | Train Acc: 60.64% | Test Acc: 59.57% | F1: 0.4448
+Epoch [ 10/50] | Train Loss: 0.3108 | Test Loss: 0.7402 | Train Acc: 96.28% | Test Acc: 93.62% | F1: 0.9314
+Epoch [ 20/50] | Train Loss: 0.1252 | Test Loss: 0.6413 | Train Acc: 97.34% | Test Acc: 93.62% | F1: 0.9314
+Epoch [ 30/50] | Train Loss: 0.0950 | Test Loss: 0.2748 | Train Acc: 97.87% | Test Acc: 95.74% | F1: 0.9555
+Epoch [ 40/50] | Train Loss: 0.1020 | Test Loss: 0.6068 | Train Acc: 97.87% | Test Acc: 93.62% | F1: 0.9314
+Epoch [ 50/50] | Train Loss: 0.1214 | Test Loss: 0.2295 | Train Acc: 97.87% | Test Acc: 95.74% | F1: 0.9555
+
+Training complete!
+
+--------------------------------------------------------------------------------
+4.1 Training Curves
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+4.2 Final Evaluation
+--------------------------------------------------------------------------------
+
+================================================================================
+FINAL PERFORMANCE
+================================================================================
+Accuracy: 95.74%
+F1 Score: 0.9555
+
+Classification Report:
+              precision    recall  f1-score   support
+
+          AQ       1.00      0.78      0.88         9
+          HQ       1.00      1.00      1.00        10
+          LQ       0.93      1.00      0.97        28
+
+    accuracy                           0.96        47
+   macro avg       0.98      0.93      0.95        47
+weighted avg       0.96      0.96      0.96        47
+
+
+--------------------------------------------------------------------------------
+4.3 Hidden Layer Spiking Activity
+--------------------------------------------------------------------------------
+Hidden Layer 1 spike rate: 0.0719
+Hidden Layer 2 spike rate: 0.0303
+
+================================================================================
+PART 5: TEMPORAL SPIKE ATTRIBUTION
+================================================================================
+
+TSA METHODOLOGY (Following Reference Implementation):
+======================================================
+
+The Temporal Spike Attribution method used here is ANALYTICAL, not gradient-based.
+
+Key Steps:
+1. Extract spike times from input and all hidden layers
+2. For each timestep t, compute spike contribution: N(t) = beta^(tc - t)
+   - tc = current time (total sequence length)
+   - beta = membrane decay parameter (0.9)
+   - Earlier spikes have larger contribution due to exponential decay
+
+3. Create diagonal matrices of spike contributions per layer
+4. Forward-propagate through network weights:
+   - Layer 0 (input): N_0(t) * W_1
+   - Layer 1 (hidden1): N_1(t) * W_2
+   - Layer 2 (hidden2): N_2(t) * W_3
+   - Combine: attribution(t) = N_0 @ W_1 @ N_1 @ W_2 @ N_2 @ W_3
+
+5. Weight by output class probabilities (from softmax of membrane potentials)
+6. Result: [timesteps × features] attribution map showing importance of each spike
+
+This differs from gradient-based methods:
+- NO backpropagation through the network
+- NO noise injection or smoothing
+- Deterministic, analytical computation
+- Based on spike timing and weight propagation
+
+Selected sample index: 0
+True label: AQ
+Predicted label: AQ
+Output membrane sums: [ -89.40015 -163.21011 -253.51877]
+
+Top attributed spikes:
+   timestep           feature  attribution
+0       496    MQ-4_R1 (kOhm)     0.001579
+1       491    MQ-4_R1 (kOhm)     0.000854
+2       496   Temperature (C)    -0.000622
+3       486   Temperature (C)     0.000198
+4       482    MQ-4_R1 (kOhm)     0.000062
+5       491   Temperature (C)     0.000050
+6       481  Rel_Humidity (%)     0.000040
+7       486    MQ-4_R1 (kOhm)    -0.000036
+8       481   Temperature (C)     0.000033
+9       482   Temperature (C)     0.000032
+
+Verification results:
+  Baseline prediction: AQ
+  Edited prediction:   AQ
+  Baseline membrane sums: [ -89.40015 -163.21011 -253.51877]
+  Edited membrane sums:   [ -94.47858 -159.75667 -246.90472]
+  Random edit #1: prediction = AQ, membrane sums = [-101.29164 -164.6665  -250.80576]
+  Random edit #2: prediction = AQ, membrane sums = [ -99.07115 -161.75851 -244.3194 ]
+  Random edit #3: prediction = AQ, membrane sums = [ -95.76512 -161.71259 -248.09027]
+
+Model saved to: trained_models\wine_timeseries_snn_tsa_seq500_beta0.9_bs16_lr0.001_ep50.pth
+
+================================================================================
+PIPELINE COMPLETE
+================================================================================
