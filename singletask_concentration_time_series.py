@@ -9,7 +9,7 @@ This script implements an SNN for ethanol concentration regression with:
 4. Model training and evaluation for concentration prediction
 
 Dataset: Ethanol Time-Series Dataset
-Architecture: LIF-based SNN with 2 hidden layers (28, 14 neurons)
+Architecture: LIF-based SNN with 2 hidden layers (28, 14 neurons)s
 Task: Continuous concentration regression from temporal sensor data
 """
 
@@ -321,9 +321,40 @@ We convert normalized time series values directly to binary spikes:
 - Preserves temporal dynamics throughout the sequence
 """)
 
-ENCODING_TYPE = 'rate'
+ENCODING_TYPE = 'delta'
 
 print(f"\nEncoding type: {ENCODING_TYPE}")
+def encode_time_series_delta(sequences, threshold=0.05):
+    """
+    Encode time series as spikes representing significant temporal changes.
+    Input shape: [samples, timesteps, features]
+    Output shape: [timesteps, samples, features]
+    """
+    print(f"  Encoding {sequences.shape[0]} sequences with delta encoding...")
+
+    sequences_tensor = torch.FloatTensor(sequences)
+
+    # Compute differences along the time axis
+    deltas = sequences_tensor[:, 1:, :] - sequences_tensor[:, :-1, :]
+
+    # Normalize deltas to [0, 1] range
+    min_val, max_val = deltas.min(), deltas.max()
+    deltas = (deltas - min_val) / (max_val - min_val + 1e-8)
+
+    # Apply threshold → spike when change exceeds threshold
+    spike_data = (torch.abs(deltas) > threshold).float()
+
+    # Permute to [timesteps, samples, features]
+    spike_data = spike_data.permute(1, 0, 2)
+
+    print(f"  Spike data shape: {spike_data.shape} (timesteps, samples, features)")
+    total_spikes = spike_data.sum().item()
+    spike_rate = total_spikes / spike_data.numel()
+    print(f"  Total spikes: {total_spikes:,.0f}")
+    print(f"  Spike rate: {spike_rate:.4f}")
+
+    return spike_data
+
 
 def encode_time_series_direct(sequences):
     """
@@ -355,36 +386,27 @@ def encode_time_series_direct(sequences):
 
 def encode_time_series_rate(sequences, num_steps=100):
     """
-    Encode time series using rate encoding.
-    Each input value in [0,1] determines the probability of a spike
-    at each timestep across 'num_steps'.
+    Converts [samples, timesteps, features] into rate-coded spikes
+    → [timesteps, samples, features]
     """
     print(f"  Encoding {sequences.shape[0]} sequences with rate encoding ({num_steps} timesteps)...")
 
-    # Convert to tensor
     sequences_tensor = torch.FloatTensor(sequences)
-    
-    # Ensure data is normalized to [0, 1]
-    min_val = sequences_tensor.min()
-    max_val = sequences_tensor.max()
+    min_val, max_val = sequences_tensor.min(), sequences_tensor.max()
     if max_val > 1.0 or min_val < 0.0:
         sequences_tensor = (sequences_tensor - min_val) / (max_val - min_val + 1e-8)
         print(f"  Normalized data from [{min_val:.3f}, {max_val:.3f}] → [0, 1]")
 
-    # Generate random spikes according to rate
-    # Shape: [timesteps, samples, features]
-    rand = torch.rand((num_steps, *sequences_tensor.shape))
-    spike_data = (rand < sequences_tensor.unsqueeze(0)).float()
+    # Collapse the original time dimension (average rate per feature)
+    avg_input = sequences_tensor.mean(dim=1)  # [samples, features]
+
+    # Generate rate-encoded spikes → [num_steps, samples, features]
+    rand = torch.rand((num_steps, *avg_input.shape))
+    spike_data = (rand < avg_input.unsqueeze(0)).float()
 
     print(f"  Spike data shape: {spike_data.shape} (timesteps, samples, features)")
-    
-    # Calculate statistics
-    total_spikes = spike_data.sum().item()
-    spike_rate = total_spikes / spike_data.numel()
-    print(f"  Total spikes: {total_spikes:,.0f}")
-    print(f"  Average spike rate: {spike_rate:.4f}")
-
     return spike_data
+
 
 
 if ENCODING_TYPE == 'rate':
@@ -394,13 +416,19 @@ if ENCODING_TYPE == 'rate':
 
     print("\nEncoding test data:")
     spike_test = encode_time_series_rate(X_test, num_steps=100)
-else:
+elif ENCODING_TYPE == 'direct':
     # Encode training and test data
     print("\nEncoding training data:")
     spike_train = encode_time_series_direct(X_train)
 
     print("\nEncoding test data:")
     spike_test = encode_time_series_direct(X_test)
+else:    # Encode training and test data
+    print("\nEncoding training data:")
+    spike_train = encode_time_series_delta(X_train, threshold=0.05)
+
+    print("\nEncoding test data:")
+    spike_test = encode_time_series_delta(X_test, threshold=0.05)
 
 # Convert labels to tensors
 y_train_tensor = torch.FloatTensor(y_train)
