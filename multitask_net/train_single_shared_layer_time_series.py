@@ -44,10 +44,11 @@ SENSOR_COLS = [
     'MQ-3_R2 (kOhm)', 'MQ-4_R2 (kOhm)', 'MQ-6_R2 (kOhm)'
 ]
 
-# Model hyperparameters
-SHARED_HIDDEN = 28
-CLASS_HIDDEN = 8
-REG_HIDDEN = 14
+# Model hyperparameters - New Architecture
+ENCODER_HIDDEN = 8    # Common encoder for both tasks
+SHARED_HIDDEN = 24    # Shared layer (8→24)
+CLASS_HIDDEN = 8      # Classification hidden layer
+REG_HIDDEN = 14       # Regression hidden layer
 NUM_CLASSES = 3
 BETA = 0.9
 
@@ -943,6 +944,9 @@ def main(selected_arch_name=None):
         'beta': BETA
     }
 
+    # New architecture parameters
+    if 'encoder_hidden' in ctor_params:
+        model_kwargs['encoder_hidden'] = ENCODER_HIDDEN
     if 'shared_hidden' in ctor_params:
         model_kwargs['shared_hidden'] = SHARED_HIDDEN
     if 'shared_hidden1' in ctor_params:
@@ -1079,6 +1083,7 @@ def main(selected_arch_name=None):
         'architecture_name': selected_arch_name,
         'architecture': {
             'input_size': input_size,
+            'encoder_hidden': ENCODER_HIDDEN,
             'shared_hidden': SHARED_HIDDEN,
             'classification_hidden': CLASS_HIDDEN,
             'regression_hidden': REG_HIDDEN,
@@ -1160,12 +1165,13 @@ APPROACH: TIME SERIES DIRECT PROCESSING
 - Only MQ sensor data (6 features, no temperature/humidity)
 - Preserves temporal dynamics throughout training
 
-ARCHITECTURE:
-=============
-- Input: {input_size} features per timestep
-- Shared hidden: {SHARED_HIDDEN} neurons
-- Classification hidden: {CLASS_HIDDEN} neurons
-- Regression hidden: {REG_HIDDEN} neurons
+ARCHITECTURE: ENCODER + SHARED + TASK-SPECIFIC
+==============================================
+- Input: {input_size} features per timestep (MQ sensors only)
+- Common Encoder: {ENCODER_HIDDEN} neurons (shared encoding)
+- Shared Layer: {SHARED_HIDDEN} neurons ({ENCODER_HIDDEN} → {SHARED_HIDDEN})
+- Classification Branch: {SHARED_HIDDEN} → {CLASS_HIDDEN} → {NUM_CLASSES}
+- Regression Branch: {SHARED_HIDDEN} → {REG_HIDDEN} → 1
 - Total timesteps: {SEQUENCE_LENGTH}
 - Encoding: {ENCODING_TYPE}
 
