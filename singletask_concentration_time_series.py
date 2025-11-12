@@ -1,59 +1,85 @@
 """
-Ethanol Concentration Regression using Time Series SNNs with snntorch
-UPDATED: Now uses full time series data instead of aggregated statistics!
+Multitask Time Series SNN Training: Wine Classification + Ethanol Concentration Regression
+Training script using DIRECT TIME SERIES DATA (not aggregated metrics)
 
-This script implements an SNN for ethanol concentration regression with:
-1. Time series data loading and preprocessing
-2. Direct spike encoding from temporal sequences
-3. SNN architecture with temporal processing
-4. Model training and evaluation for concentration prediction
+This script trains a single SNN with ONE shared layer followed by separate hidden layers:
+1. Wine quality classification (HQ, LQ, AQ) - with dedicated hidden layer
+2. Ethanol concentration regression (1-20%) - with dedicated hidden layer
 
-Dataset: Ethanol Time-Series Dataset
-Architecture: LIF-based SNN with 2 hidden layers (28, 14 neurons)s
-Task: Continuous concentration regression from temporal sensor data
+Key differences from aggregated approach:
+- Uses full temporal sequences (1000 timesteps) instead of statistical features
+- Direct spike encoding from time series (not latency encoding on aggregates)
+- Only MQ sensor data (excludes temperature and humidity)
+- Preserves temporal dynamics throughout training
+
+Architecture: Shared (28) → Classification Hidden (8) → 3 outputs
+                          → Regression Hidden (14) → 1 output
 """
 
 import os
-import warnings
+import sys
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
-
-# PyTorch
-import torch
-import torch.nn as nn
-
-# scikit-learn
+from sklearn.metrics import (
+    accuracy_score, precision_recall_fscore_support, confusion_matrix,
+    mean_squared_error, mean_absolute_error, r2_score
+)
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import MinMaxScaler
-from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import seaborn as sns
+from datetime import datetime
 
-# snntorch
-import snntorch as snn
-from snntorch import spikegen
+# Import architecture utilities
+from architectures import (
+    get_available_architectures,
+    load_architecture,
+    print_available_architectures
+)
 
-warnings.filterwarnings('ignore')
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
 
-# Set random seeds for reproducibility
-np.random.seed(42)
-torch.manual_seed(42)
+# Time series configuration
+SEQUENCE_LENGTH = 1000
+DOWNSAMPLE_FACTOR = 2
+STABILIZATION_PERIOD = 500
+ENCODING_TYPE = 'direct'  # Options: 'direct', 'delta', 'rate'
 
-# Device configuration
+# Only MQ sensors (excluding temperature and humidity)
+SENSOR_COLS = [
+    'MQ-3_R1 (kOhm)', 'MQ-4_R1 (kOhm)', 'MQ-6_R1 (kOhm)',
+    'MQ-3_R2 (kOhm)', 'MQ-4_R2 (kOhm)', 'MQ-6_R2 (kOhm)'
+]
+
+# Model hyperparameters
+SHARED_HIDDEN = 28
+CLASS_HIDDEN = 8
+REG_HIDDEN = 14
+NUM_CLASSES = 3
+BETA = 0.9
+
+# Training hyperparameters
+LEARNING_RATE = 0.001
+NUM_EPOCHS = 100
+BATCH_SIZE = 16
+REG_WEIGHT = 0.5
+
+# Device
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-print(f"Using device: {device}")
 
 # ============================================================================
-# PART 1: TIME SERIES DATA LOADING AND PREPROCESSING
+# DATA LOADING FUNCTIONS
 # ============================================================================
 
-print("\n" + "="*80)
-print("PART 1: LOADING ETHANOL TIME-SERIES DATASET")
-print("="*80)
-
-def load_ethanol_dataset(base_path):
+def load_wine_timeseries_dataset(base_path):
     """
-    Loads the ethanol time-series dataset preserving temporal structure.
+    Load wine dataset preserving temporal structure.
+    Returns DataFrame with time series for each file.
     """
     all_data = []
     
@@ -63,22 +89,83 @@ def load_ethanol_dataset(base_path):
         'MQ-3_R2 (kOhm)', 'MQ-4_R2 (kOhm)', 'MQ-6_R2 (kOhm)'
     ]
     
-    # Concentration mapping
-    ethanol_concentration_map = {
-        'C1': 1.0,    # 1%
-        'C2': 2.5,    # 2.5%
-        'C3': 5.0,    # 5%
-        'C4': 10.0,   # 10%
-        'C5': 15.0,   # 15%
-        'C6': 20.0    # 20%
+    wine_categories = {
+        'HQ': 'HQ',  # High Quality
+        'LQ': 'LQ',  # Low Quality
+        'AQ': 'AQ'   # Average Quality
     }
     
-    print(f"Loading data from: {base_path}")
+    print(f"Loading wine data from: {base_path}")
+    
+    for category, label in wine_categories.items():
+        category_path = os.path.join(base_path, category)
+        if not os.path.exists(category_path):
+            continue
+            
+        print(f"Processing category: {category}...")
+        
+        files = os.listdir(category_path)
+        for file_name in files:
+            if file_name.endswith('.txt'):
+                file_path = os.path.join(category_path, file_name)
+                
+                try:
+                    df_file = pd.read_csv(file_path, sep=r'\s+', header=None, 
+                                        names=ts_columns)
+                    df_file['Filename'] = file_name
+                    df_file['Time_Point'] = range(len(df_file))
+                    df_file['Category'] = category
+                    df_file['Label'] = label
+                    
+                    # Extract repetition
+                    rep_start_index = file_name.rfind('R')
+                    df_file['Repetition'] = (file_name[rep_start_index:rep_start_index + 3] 
+                                            if rep_start_index != -1 else 'Unknown')
+                    
+                    all_data.append(df_file)
+                    
+                except Exception as e:
+                    print(f"Error processing {file_name}: {e}")
+                    continue
+    
+    if not all_data:
+        return pd.DataFrame()
+    
+    final_df = pd.concat(all_data, ignore_index=True)
+    print(f"\nTotal wine rows loaded: {len(final_df)}")
+    print(f"Unique wine files: {final_df['Filename'].nunique()}")
+    return final_df
+
+
+def load_ethanol_timeseries_dataset(base_path):
+    """
+    Load ethanol dataset preserving temporal structure.
+    Returns DataFrame with time series for each file.
+    """
+    all_data = []
+    
+    ts_columns = [
+        'Rel_Humidity (%)', 'Temperature (C)',
+        'MQ-3_R1 (kOhm)', 'MQ-4_R1 (kOhm)', 'MQ-6_R1 (kOhm)',
+        'MQ-3_R2 (kOhm)', 'MQ-4_R2 (kOhm)', 'MQ-6_R2 (kOhm)'
+    ]
+    
+    ethanol_concentration_map = {
+        'C1': 1.0,
+        'C2': 2.5,
+        'C3': 5.0,
+        'C4': 10.0,
+        'C5': 15.0,
+        'C6': 20.0
+    }
+    
+    print(f"Loading ethanol data from: {base_path}")
     
     ethanol_path = os.path.join(base_path, 'Ethanol')
     
     if not os.path.exists(ethanol_path):
-        raise FileNotFoundError(f"Ethanol folder not found at {ethanol_path}")
+        print(f"Warning: Ethanol folder not found at {ethanol_path}")
+        return pd.DataFrame()
     
     print(f"Processing folder: Ethanol...")
     
@@ -88,7 +175,8 @@ def load_ethanol_dataset(base_path):
             file_path = os.path.join(ethanol_path, file_name)
             
             try:
-                df_file = pd.read_csv(file_path, sep=r'\s+', header=None, names=ts_columns)
+                df_file = pd.read_csv(file_path, sep=r'\s+', header=None, 
+                                    names=ts_columns)
                 df_file['Filename'] = file_name
                 df_file['Time_Point'] = range(len(df_file))
                 
@@ -99,7 +187,8 @@ def load_ethanol_dataset(base_path):
                 
                 # Repetition
                 rep_start_index = file_name.rfind('R')
-                df_file['Repetition'] = file_name[rep_start_index:rep_start_index + 3] if rep_start_index != -1 else 'Unknown'
+                df_file['Repetition'] = (file_name[rep_start_index:rep_start_index + 3] 
+                                        if rep_start_index != -1 else 'Unknown')
                 
                 all_data.append(df_file)
                 
@@ -111,259 +200,112 @@ def load_ethanol_dataset(base_path):
         return pd.DataFrame()
     
     final_df = pd.concat(all_data, ignore_index=True)
-    print(f"\nTotal rows loaded: {len(final_df)}")
+    print(f"\nTotal ethanol rows loaded: {len(final_df)}")
+    print(f"Unique ethanol files: {final_df['Filename'].nunique()}")
     return final_df
 
-# Load dataset
-dataset_path = 'data/wine'
-if not os.path.exists(dataset_path):
-    dataset_path = 'Dataset'
-    if not os.path.exists(dataset_path):
-        raise FileNotFoundError("Dataset directory not found")
-
-ethanol_df = load_ethanol_dataset(dataset_path)
-
-if ethanol_df.empty:
-    raise ValueError("Dataset is empty")
-
-print(f"\nDataset shape: {ethanol_df.shape}")
-print(f"Unique files: {ethanol_df['Filename'].nunique()}")
 
 # ============================================================================
-# 1.1 Remove Stabilization Period
+# TIME SERIES PREPROCESSING
 # ============================================================================
-print("\n" + "-"*80)
-print("1.1 Removing Stabilization Period")
-print("-"*80)
 
-stabilization_period = 500
-processed_files = []
-
-for filename in ethanol_df['Filename'].unique():
-    file_data = ethanol_df[ethanol_df['Filename'] == filename].copy()
+def remove_stabilization_period(df, period=500):
+    """Remove initial stabilization period from each file."""
+    processed_files = []
     
-    if len(file_data) > stabilization_period:
-        file_data = file_data.iloc[stabilization_period:].reset_index(drop=True)
-        processed_files.append(file_data)
-
-ethanol_df = pd.concat(processed_files, ignore_index=True)
-print(f"\nDataset shape after removing stabilization: {ethanol_df.shape}")
-
-# ============================================================================
-# 1.2 Prepare Time Series Sequences
-# ============================================================================
-print("\n" + "-"*80)
-print("1.2 Preparing Time Series Sequences")
-print("-"*80)
-
-sensor_cols = [
-    'MQ-3_R1 (kOhm)', 'MQ-4_R1 (kOhm)', 'MQ-6_R1 (kOhm)',
-    'MQ-3_R2 (kOhm)', 'MQ-4_R2 (kOhm)', 'MQ-6_R2 (kOhm)'
-]
-environmental_cols = ['Rel_Humidity (%)', 'Temperature (C)']
-feature_cols = sensor_cols + environmental_cols
-
-# Configuration
-SEQUENCE_LENGTH = 1000
-DOWNSAMPLE_FACTOR = 2
-
-print(f"\nTime series configuration:")
-print(f"  Sequence length: {SEQUENCE_LENGTH}")
-print(f"  Downsample factor: {DOWNSAMPLE_FACTOR}")
-print(f"  Features: {len(feature_cols)}")
-
-sequences = []
-concentrations = []
-metadata = []
-
-for filename in ethanol_df['Filename'].unique():
-    file_data = ethanol_df[ethanol_df['Filename'] == filename]
+    for filename in df['Filename'].unique():
+        file_data = df[df['Filename'] == filename].copy()
+        
+        if len(file_data) > period:
+            file_data = file_data.iloc[period:].reset_index(drop=True)
+            processed_files.append(file_data)
     
-    # Extract time series
-    sequence = file_data[feature_cols].values
-    
-    # Downsample
-    if DOWNSAMPLE_FACTOR > 1:
-        sequence = sequence[::DOWNSAMPLE_FACTOR]
-    
-    # Fix length
-    if len(sequence) < SEQUENCE_LENGTH:
-        padding = np.repeat(sequence[-1:], SEQUENCE_LENGTH - len(sequence), axis=0)
-        sequence = np.vstack([sequence, padding])
-    elif len(sequence) > SEQUENCE_LENGTH:
-        sequence = sequence[:SEQUENCE_LENGTH]
-    
-    sequences.append(sequence)
-    concentrations.append(file_data['Concentration_Value'].iloc[0])
-    
-    metadata.append({
-        'Filename': filename,
-        'Concentration_Value': file_data['Concentration_Value'].iloc[0],
-        'Concentration_Label': file_data['Concentration_Label'].iloc[0],
-        'Repetition': file_data['Repetition'].iloc[0]
-    })
+    return pd.concat(processed_files, ignore_index=True) if processed_files else pd.DataFrame()
 
-print(f"\nTotal sequences: {len(sequences)}")
-print(f"Sequence shape: {sequences[0].shape} (timesteps, features)")
 
-# ============================================================================
-# 1.3 Handle Missing Values and Normalize
-# ============================================================================
-print("\n" + "-"*80)
-print("1.3 Cleaning and Normalizing Time Series")
-print("-"*80)
-
-# Clean sequences
-def clean_sequence(seq):
-    for col_idx in range(seq.shape[1]):
-        col_data = seq[:, col_idx]
-        if np.isnan(col_data).any() or np.isinf(col_data).any():
-            col_mean = np.nanmean(col_data[np.isfinite(col_data)])
-            seq[:, col_idx] = np.where(
-                np.isnan(col_data) | np.isinf(col_data), 
-                col_mean, 
-                col_data
-            )
-    return seq
-
-sequences = [clean_sequence(seq) for seq in sequences]
-
-# Normalize sequences
-all_data = np.vstack(sequences)
-scaler_X = MinMaxScaler(feature_range=(0, 1))
-scaler_X.fit(all_data)
-
-normalized_sequences = []
-for seq in sequences:
-    normalized_seq = scaler_X.transform(seq)
-    normalized_sequences.append(normalized_seq)
-
-all_normalized = np.vstack(normalized_sequences)
-print(f"\nNormalized range: [{all_normalized.min():.3f}, {all_normalized.max():.3f}]")
-
-# ============================================================================
-# 1.4 Prepare Target (Concentrations)
-# ============================================================================
-print("\n" + "-"*80)
-print("1.4 Preparing Concentration Targets")
-print("-"*80)
-
-y_concentration = np.array(concentrations)
-
-print(f"\nConcentration distribution:")
-unique_concentrations = np.unique(y_concentration)
-for conc in sorted(unique_concentrations):
-    count = np.sum(y_concentration == conc)
-    print(f"  {conc}%: {count} samples")
-
-# Normalize concentrations for training
-scaler_y = MinMaxScaler(feature_range=(0, 1))
-y_normalized = scaler_y.fit_transform(y_concentration.reshape(-1, 1)).flatten()
-
-print(f"\nTarget range: [{y_concentration.min():.1f}%, {y_concentration.max():.1f}%]")
-print(f"Normalized target range: [{y_normalized.min():.3f}, {y_normalized.max():.3f}]")
-
-# ============================================================================
-# 1.5 Create Fixed-Size Arrays
-# ============================================================================
-print("\n" + "-"*80)
-print("1.5 Creating Fixed-Size Arrays")
-print("-"*80)
-
-max_length = SEQUENCE_LENGTH
-num_samples = len(normalized_sequences)
-num_features = len(feature_cols)
-
-X = np.zeros((num_samples, max_length, num_features))
-
-for i, seq in enumerate(normalized_sequences):
-    X[i, :len(seq), :] = seq
-
-print(f"\nFinal data shape: {X.shape} (samples, timesteps, features)")
-
-# ============================================================================
-# 1.6 Train-Test Split
-# ============================================================================
-print("\n" + "-"*80)
-print("1.6 Train-Test Split")
-print("-"*80)
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y_normalized,
-    test_size=0.2,
-    random_state=42
-)
-
-print(f"\nTraining set: {X_train.shape[0]} samples")
-print(f"Test set: {X_test.shape[0]} samples")
-
-# Denormalize for display
-y_train_orig = scaler_y.inverse_transform(y_train.reshape(-1, 1)).flatten()
-y_test_orig = scaler_y.inverse_transform(y_test.reshape(-1, 1)).flatten()
-
-print(f"\nTraining concentration range: [{y_train_orig.min():.1f}%, {y_train_orig.max():.1f}%]")
-print(f"Test concentration range: [{y_test_orig.min():.1f}%, {y_test_orig.max():.1f}%]")
-
-# ============================================================================
-# PART 2: SPIKE ENCODING FROM TIME SERIES
-# ============================================================================
-
-print("\n" + "="*80)
-print("PART 2: SPIKE ENCODING TIME SERIES DATA")
-print("="*80)
-
-print("""
-ENCODING STRATEGY: DIRECT TIME SERIES TO SPIKES
-------------------------------------------------
-We convert normalized time series values directly to binary spikes:
-- Values above threshold (0.5) → spike (1)
-- Values below threshold → no spike (0)
-- Preserves temporal dynamics throughout the sequence
-""")
-
-ENCODING_TYPE = 'delta'
-
-print(f"\nEncoding type: {ENCODING_TYPE}")
-def encode_time_series_delta(sequences, threshold=0.05):
+def prepare_time_series_sequences(df, feature_cols, sequence_length, downsample_factor):
     """
-    Encode time series as spikes representing significant temporal changes.
-    Input shape: [samples, timesteps, features]
-    Output shape: [timesteps, samples, features]
+    Prepare time series sequences from DataFrame.
+    
+    Returns:
+        sequences: List of numpy arrays [timesteps, features]
+        targets: List of target values (labels or concentrations)
+        metadata: List of metadata dicts
     """
-    print(f"  Encoding {sequences.shape[0]} sequences with delta encoding...")
+    sequences = []
+    targets = []
+    metadata = []
+    
+    for filename in df['Filename'].unique():
+        file_data = df[df['Filename'] == filename]
+        
+        # Extract time series
+        sequence = file_data[feature_cols].values
+        
+        # Downsample
+        if downsample_factor > 1:
+            sequence = sequence[::downsample_factor]
+        
+        # Fix length
+        if len(sequence) < sequence_length:
+            padding = np.repeat(sequence[-1:], sequence_length - len(sequence), axis=0)
+            sequence = np.vstack([sequence, padding])
+        elif len(sequence) > sequence_length:
+            sequence = sequence[:sequence_length]
+        
+        sequences.append(sequence)
+        
+        # Determine target based on dataset type
+        if 'Label' in file_data.columns:  # Wine dataset
+            targets.append(file_data['Label'].iloc[0])
+        elif 'Concentration_Value' in file_data.columns:  # Ethanol dataset
+            targets.append(file_data['Concentration_Value'].iloc[0])
+        
+        metadata.append({
+            'Filename': filename,
+            'Repetition': file_data['Repetition'].iloc[0]
+        })
+    
+    return sequences, targets, metadata
 
-    sequences_tensor = torch.FloatTensor(sequences)
 
-    # Compute differences along the time axis
-    deltas = sequences_tensor[:, 1:, :] - sequences_tensor[:, :-1, :]
+def clean_and_normalize_sequences(sequences):
+    """Clean missing values and normalize sequences to [0, 1]."""
+    def clean_sequence(seq):
+        for col_idx in range(seq.shape[1]):
+            col_data = seq[:, col_idx]
+            if np.isnan(col_data).any() or np.isinf(col_data).any():
+                col_mean = np.nanmean(col_data[np.isfinite(col_data)])
+                seq[:, col_idx] = np.where(
+                    np.isnan(col_data) | np.isinf(col_data), 
+                    col_mean, 
+                    col_data
+                )
+        return seq
+    
+    sequences = [clean_sequence(seq) for seq in sequences]
+    
+    # Normalize
+    all_data = np.vstack(sequences)
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaler.fit(all_data)
+    
+    normalized_sequences = [scaler.transform(seq) for seq in sequences]
+    
+    return normalized_sequences, scaler
 
-    # Normalize deltas to [0, 1] range
-    min_val, max_val = deltas.min(), deltas.max()
-    deltas = (deltas - min_val) / (max_val - min_val + 1e-8)
 
-    # Apply threshold → spike when change exceeds threshold
-    spike_data = (torch.abs(deltas) > threshold).float()
-
-    # Permute to [timesteps, samples, features]
-    spike_data = spike_data.permute(1, 0, 2)
-
-    print(f"  Spike data shape: {spike_data.shape} (timesteps, samples, features)")
-    total_spikes = spike_data.sum().item()
-    spike_rate = total_spikes / spike_data.numel()
-    print(f"  Total spikes: {total_spikes:,.0f}")
-    print(f"  Spike rate: {spike_rate:.4f}")
-
-    return spike_data
-
+# ============================================================================
+# SPIKE ENCODING FUNCTIONS
+# ============================================================================
 
 def encode_time_series_direct(sequences):
     """
-    Encode time series using direct threshold-based conversion.
+    Direct threshold-based spike encoding.
+    Input: List of [timesteps, features] arrays
+    Output: [timesteps, samples, features] tensor
     """
-    print(f"  Encoding {sequences.shape[0]} sequences...")
-    
-    # Convert to tensor
-    sequences_tensor = torch.FloatTensor(sequences)
+    sequences_tensor = torch.FloatTensor(np.array(sequences))
     
     # Threshold-based: values > 0.5 become spikes
     spike_data = (sequences_tensor > 0.5).float()
@@ -371,675 +313,846 @@ def encode_time_series_direct(sequences):
     # Reshape to [timesteps, samples, features]
     spike_data = spike_data.permute(1, 0, 2)
     
-    print(f"  Spike data shape: {spike_data.shape} (timesteps, samples, features)")
-    
-    # Calculate statistics
-    total_spikes = spike_data.sum().item()
-    spike_rate = total_spikes / spike_data.numel()
-    
-    print(f"  Total spikes: {total_spikes:,.0f}")
-    print(f"  Spike rate: {spike_rate:.4f}")
-    
     return spike_data
 
+
+def encode_time_series_delta(sequences, threshold=0.05):
+    """
+    Delta encoding - spikes represent significant temporal changes.
+    """
+    sequences_tensor = torch.FloatTensor(np.array(sequences))
+    
+    # Compute differences
+    deltas = sequences_tensor[:, 1:, :] - sequences_tensor[:, :-1, :]
+    
+    # Normalize deltas
+    min_val, max_val = deltas.min(), deltas.max()
+    deltas = (deltas - min_val) / (max_val - min_val + 1e-8)
+    
+    # Apply threshold
+    spike_data = (torch.abs(deltas) > threshold).float()
+    
+    # Permute to [timesteps, samples, features]
+    spike_data = spike_data.permute(1, 0, 2)
+    
+    return spike_data
 
 
 def encode_time_series_rate(sequences, num_steps=100):
     """
-    Converts [samples, timesteps, features] into rate-coded spikes
-    → [timesteps, samples, features]
+    Rate encoding - spike frequency represents value.
     """
-    print(f"  Encoding {sequences.shape[0]} sequences with rate encoding ({num_steps} timesteps)...")
-
-    sequences_tensor = torch.FloatTensor(sequences)
+    sequences_tensor = torch.FloatTensor(np.array(sequences))
+    
+    # Normalize if needed
     min_val, max_val = sequences_tensor.min(), sequences_tensor.max()
     if max_val > 1.0 or min_val < 0.0:
         sequences_tensor = (sequences_tensor - min_val) / (max_val - min_val + 1e-8)
-        print(f"  Normalized data from [{min_val:.3f}, {max_val:.3f}] → [0, 1]")
-
-    # Collapse the original time dimension (average rate per feature)
-    avg_input = sequences_tensor.mean(dim=1)  # [samples, features]
-
-    # Generate rate-encoded spikes → [num_steps, samples, features]
+    
+    # Average over time
+    avg_input = sequences_tensor.mean(dim=1)
+    
+    # Generate rate-encoded spikes
     rand = torch.rand((num_steps, *avg_input.shape))
     spike_data = (rand < avg_input.unsqueeze(0)).float()
-
-    print(f"  Spike data shape: {spike_data.shape} (timesteps, samples, features)")
+    
     return spike_data
 
 
-
-if ENCODING_TYPE == 'rate':
-    # Encode training and test data
-    print("\nEncoding training data:")
-    spike_train = encode_time_series_rate(X_train, num_steps=100)
-
-    print("\nEncoding test data:")
-    spike_test = encode_time_series_rate(X_test, num_steps=100)
-elif ENCODING_TYPE == 'direct':
-    # Encode training and test data
-    print("\nEncoding training data:")
-    spike_train = encode_time_series_direct(X_train)
-
-    print("\nEncoding test data:")
-    spike_test = encode_time_series_direct(X_test)
-else:    # Encode training and test data
-    print("\nEncoding training data:")
-    spike_train = encode_time_series_delta(X_train, threshold=0.05)
-
-    print("\nEncoding test data:")
-    spike_test = encode_time_series_delta(X_test, threshold=0.05)
-
-# Convert labels to tensors
-y_train_tensor = torch.FloatTensor(y_train)
-y_test_tensor = torch.FloatTensor(y_test)
-
-print("\n✓ Spike encoding completed!")
-
 # ============================================================================
-# PART 3: SNN ARCHITECTURE FOR TIME SERIES REGRESSION
+# TRAINING FUNCTIONS
 # ============================================================================
 
-print("\n" + "="*80)
-print("PART 3: DESIGNING SNN ARCHITECTURE FOR TIME SERIES REGRESSION")
-print("="*80)
-
-class TimeSeriesConcentrationSNN(nn.Module):
-    """
-    Spiking Neural Network for Ethanol Concentration Regression from Time Series
+def create_dataloaders(X_train, y_train, X_test, y_test, batch_size=32):
+    """Create PyTorch DataLoaders."""
+    train_dataset = TensorDataset(X_train, y_train)
+    test_dataset = TensorDataset(X_test, y_test)
     
-    Architecture:
-    - Input: [timesteps, batch, features] time series
-    - Hidden Layer 1: 28 LIF neurons
-    - Hidden Layer 2: 14 LIF neurons
-    - Output Layer: 1 neuron (concentration)
-    """
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     
-    def __init__(self, input_size=8, hidden_size1=28, hidden_size2=14, 
-                 output_size=1, beta=0.9):
-        super(TimeSeriesConcentrationSNN, self).__init__()
-        
-        self.input_size = input_size
-        self.hidden_size1 = hidden_size1
-        self.hidden_size2 = hidden_size2
-        self.output_size = output_size
-        
-        # Fully connected layers
-        self.fc1 = nn.Linear(input_size, hidden_size1)
-        self.fc2 = nn.Linear(hidden_size1, hidden_size2)
-        self.fc3 = nn.Linear(hidden_size2, output_size)
-        
-        # LIF neuron layers
-        self.lif1 = snn.Leaky(beta=beta)
-        self.lif2 = snn.Leaky(beta=beta)
-        self.lif3 = snn.Leaky(beta=beta)
-        
-    def forward(self, x):
-        """
-        Forward pass through the SNN
-        
-        Args:
-            x: Input spike train [time_steps, batch_size, input_size]
-            
-        Returns:
-            mem_rec3: Membrane potential recordings for regression
-            spk_rec1, spk_rec2: Hidden layer spike recordings
-        """
-        # Initialize membrane potentials
-        mem1 = self.lif1.init_leaky()
-        mem2 = self.lif2.init_leaky()
-        mem3 = self.lif3.init_leaky()
-        
-        # Record activity
-        spk_rec1 = []
-        spk_rec2 = []
-        mem_rec3 = []
-        
-        # Process each timestep
-        num_steps = x.size(0)
-        for step in range(num_steps):
-            x_step = x[step]
-            
-            # Layer 1
-            cur1 = self.fc1(x_step)
-            spk1, mem1 = self.lif1(cur1, mem1)
-            
-            # Layer 2
-            cur2 = self.fc2(spk1)
-            spk2, mem2 = self.lif2(cur2, mem2)
-            
-            # Layer 3 (output)
-            cur3 = self.fc3(spk2)
-            spk3, mem3 = self.lif3(cur3, mem3)
-            
-            # Record
-            spk_rec1.append(spk1)
-            spk_rec2.append(spk2)
-            mem_rec3.append(mem3)
-        
-        # Stack recordings
-        spk_rec1 = torch.stack(spk_rec1)
-        spk_rec2 = torch.stack(spk_rec2)
-        mem_rec3 = torch.stack(mem_rec3)
-        
-        return mem_rec3, spk_rec1, spk_rec2
+    return train_loader, test_loader
 
-# ============================================================================
-# 3.1 Instantiate Model
-# ============================================================================
-print("\n" + "-"*80)
-print("3.1 Model Instantiation")
-print("-"*80)
 
-input_size = num_features  # 8 features
-hidden_size1 = 28
-hidden_size2 = 14
-output_size = 1
-beta = 0.9
-
-print(f"\nModel configuration:")
-print(f"  Input size: {input_size} (features per timestep)")
-print(f"  Hidden layer 1: {hidden_size1} neurons")
-print(f"  Hidden layer 2: {hidden_size2} neurons")
-print(f"  Output size: {output_size} (regression)")
-print(f"  Beta: {beta}")
-print(f"  Timesteps: {SEQUENCE_LENGTH}")
-
-model = TimeSeriesConcentrationSNN(
-    input_size=input_size,
-    hidden_size1=hidden_size1,
-    hidden_size2=hidden_size2,
-    output_size=output_size,
-    beta=beta
-).to(device)
-
-print(f"\nModel created on {device}")
-print(model)
-
-total_params = sum(p.numel() for p in model.parameters())
-print(f"\nTotal parameters: {total_params:,}")
-
-# ============================================================================
-# PART 4: TRAINING
-# ============================================================================
-
-print("\n" + "="*80)
-print("PART 4: TRAINING TIME SERIES REGRESSION SNN")
-print("="*80)
-
-# Training configuration
-num_epochs = 100
-batch_size = 16
-learning_rate = 0.001
-
-print(f"\nTraining configuration:")
-print(f"  Epochs: {num_epochs}")
-print(f"  Batch size: {batch_size}")
-print(f"  Learning rate: {learning_rate}")
-
-# Loss and optimizer
-criterion = nn.MSELoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
-scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-    optimizer, mode='min', factor=0.5, patience=10
-)
-
-# Data loaders
-train_dataset = torch.utils.data.TensorDataset(
-    spike_train.permute(1, 0, 2),  # [samples, time, features]
-    y_train_tensor
-)
-
-test_dataset = torch.utils.data.TensorDataset(
-    spike_test.permute(1, 0, 2),
-    y_test_tensor
-)
-
-train_loader = torch.utils.data.DataLoader(
-    train_dataset, batch_size=batch_size, shuffle=True
-)
-
-test_loader = torch.utils.data.DataLoader(
-    test_dataset, batch_size=batch_size, shuffle=False
-)
-
-print(f"\nTrain batches: {len(train_loader)}")
-print(f"Test batches: {len(test_loader)}")
-
-# ============================================================================
-# 4.1 Training Loop
-# ============================================================================
-print("\n" + "-"*80)
-print("4.1 Training Loop")
-print("-"*80)
-
-train_losses = []
-test_losses = []
-test_r2_scores = []
-
-print("\nStarting training...")
-print("-" * 80)
-
-for epoch in range(num_epochs):
-    # Training
+def train_multitask_epoch(model, wine_loader, ethanol_loader, device,
+                          classification_criterion, regression_criterion,
+                          optimizer, reg_weight=0.5):
+    """Train for one epoch using both tasks."""
     model.train()
-    train_loss = 0.0
+    total_loss = 0
+    total_class_loss = 0
+    total_reg_loss = 0
+    num_batches = 0
     
-    for spike_batch, target_batch in train_loader:
-        spike_batch = spike_batch.permute(1, 0, 2).to(device)
-        target_batch = target_batch.to(device)
-        
-        mem_rec, _, _ = model(spike_batch)
-        
-        # Use mean membrane potential for regression
-        predictions = mem_rec.mean(dim=0).squeeze()
-        
-        loss = criterion(predictions, target_batch)
-        
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        
-        train_loss += loss.item()
+    wine_iter = iter(wine_loader)
+    ethanol_iter = iter(ethanol_loader)
     
-    train_loss /= len(train_loader)
-    train_losses.append(train_loss)
+    wine_exhausted = False
+    ethanol_exhausted = False
     
-    # Evaluation
+    while not (wine_exhausted and ethanol_exhausted):
+        batch_loss = 0
+        batch_class_loss = 0
+        batch_reg_loss = 0
+        tasks_processed = 0
+        
+        # Process wine batch (classification)
+        if not wine_exhausted:
+            try:
+                wine_spikes, wine_labels = next(wine_iter)
+                wine_spikes = wine_spikes.to(device)
+                wine_labels = wine_labels.to(device)
+                
+                # Permute to [time_steps, batch, features]
+                wine_spikes = wine_spikes.permute(1, 0, 2)
+                
+                # Forward pass
+                output = model(wine_spikes)
+                
+                # Classification loss
+                class_mem_rec = output['classification']['mem_rec']
+                class_loss = classification_criterion(
+                    class_mem_rec.sum(0), wine_labels.long()
+                )
+                
+                batch_class_loss = class_loss.item()
+                batch_loss += (1 - reg_weight) * class_loss
+                tasks_processed += 1
+                
+            except StopIteration:
+                wine_exhausted = True
+        
+        # Process ethanol batch (regression)
+        if not ethanol_exhausted:
+            try:
+                ethanol_spikes, ethanol_conc = next(ethanol_iter)
+                ethanol_spikes = ethanol_spikes.to(device)
+                ethanol_conc = ethanol_conc.to(device)
+                
+                # Permute to [time_steps, batch, features]
+                ethanol_spikes = ethanol_spikes.permute(1, 0, 2)
+                
+                # Forward pass
+                output = model(ethanol_spikes)
+                
+                # Regression loss
+                reg_mem_rec = output['regression']['mem_rec']
+                predicted_conc = reg_mem_rec.sum(0)
+                reg_loss = regression_criterion(predicted_conc.squeeze(), ethanol_conc)
+                
+                batch_reg_loss = reg_loss.item()
+                batch_loss += reg_weight * reg_loss
+                tasks_processed += 1
+                
+            except StopIteration:
+                ethanol_exhausted = True
+        
+        # Backpropagation
+        if tasks_processed > 0:
+            optimizer.zero_grad()
+            batch_loss.backward()
+            optimizer.step()
+            
+            total_loss += batch_loss.item()
+            total_class_loss += batch_class_loss
+            total_reg_loss += batch_reg_loss
+            num_batches += 1
+    
+    avg_loss = total_loss / num_batches if num_batches > 0 else 0
+    avg_class_loss = total_class_loss / num_batches if num_batches > 0 else 0
+    avg_reg_loss = total_reg_loss / num_batches if num_batches > 0 else 0
+    
+    return avg_loss, avg_class_loss, avg_reg_loss
+
+
+def evaluate_classification(model, data_loader, device):
+    """Evaluate classification performance."""
     model.eval()
-    test_loss = 0.0
-    all_predictions = []
+    all_preds = []
+    all_labels = []
+    
+    with torch.no_grad():
+        for spikes, labels in data_loader:
+            spikes = spikes.to(device)
+            labels = labels.to(device)
+            
+            spikes = spikes.permute(1, 0, 2)
+            
+            output = model(spikes)
+            mem_rec = output['classification']['mem_rec']
+            
+            _, predicted = torch.max(mem_rec.sum(0), 1)
+            
+            all_preds.extend(predicted.cpu().numpy())
+            all_labels.extend(labels.cpu().numpy())
+    
+    all_preds = np.array(all_preds)
+    all_labels = np.array(all_labels)
+    
+    accuracy = accuracy_score(all_labels, all_preds)
+    precision, recall, f1, _ = precision_recall_fscore_support(
+        all_labels, all_preds, average='weighted', zero_division=0
+    )
+    cm = confusion_matrix(all_labels, all_preds)
+    
+    return {
+        'accuracy': accuracy,
+        'precision': precision,
+        'recall': recall,
+        'f1': f1,
+        'confusion_matrix': cm,
+        'predictions': all_preds,
+        'labels': all_labels
+    }
+
+
+def evaluate_regression(model, data_loader, device):
+    """Evaluate regression performance."""
+    model.eval()
+    all_preds = []
     all_targets = []
     
     with torch.no_grad():
-        for spike_batch, target_batch in test_loader:
-            spike_batch = spike_batch.permute(1, 0, 2).to(device)
-            target_batch = target_batch.to(device)
+        for spikes, targets in data_loader:
+            spikes = spikes.to(device)
+            targets = targets.to(device)
             
-            mem_rec, _, _ = model(spike_batch)
-            predictions = mem_rec.mean(dim=0).squeeze()
+            spikes = spikes.permute(1, 0, 2)
             
-            loss = criterion(predictions, target_batch)
-            test_loss += loss.item()
+            output = model(spikes)
+            mem_rec = output['regression']['mem_rec']
             
-            all_predictions.extend(predictions.cpu().numpy())
-            all_targets.extend(target_batch.cpu().numpy())
+            predicted = mem_rec.sum(0).squeeze()
+            
+            all_preds.extend(predicted.cpu().numpy())
+            all_targets.extend(targets.cpu().numpy())
     
-    test_loss /= len(test_loader)
-    test_losses.append(test_loss)
+    all_preds = np.array(all_preds)
+    all_targets = np.array(all_targets)
     
-    # Calculate R² score
-    r2 = r2_score(all_targets, all_predictions)
-    test_r2_scores.append(r2)
+    mse = mean_squared_error(all_targets, all_preds)
+    rmse = np.sqrt(mse)
+    mae = mean_absolute_error(all_targets, all_preds)
+    r2 = r2_score(all_targets, all_preds)
     
-    scheduler.step(test_loss)
-    
-    if (epoch + 1) % 10 == 0 or epoch == 0:
-        print(f"Epoch [{epoch+1:3d}/{num_epochs}] | "
-              f"Train Loss: {train_loss:.6f} | "
-              f"Test Loss: {test_loss:.6f} | "
-              f"R²: {r2:.4f}")
+    return {
+        'mse': mse,
+        'rmse': rmse,
+        'mae': mae,
+        'r2': r2,
+        'predictions': all_preds,
+        'targets': all_targets
+    }
 
-print("\n✓ Training completed!")
 
 # ============================================================================
-# 4.2 Visualize Training History
+# VISUALIZATION FUNCTIONS
 # ============================================================================
-print("\n" + "-"*80)
-print("4.2 Training History")
-print("-"*80)
 
-fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+def plot_training_history(history):
+    """Plot training history."""
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    
+    axes[0].plot(history['total_loss'], label='Total Loss', linewidth=2)
+    axes[0].set_xlabel('Epoch', fontsize=12)
+    axes[0].set_ylabel('Loss', fontsize=12)
+    axes[0].set_title('Total Training Loss', fontsize=14, fontweight='bold')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+    
+    axes[1].plot(history['class_loss'], label='Classification Loss',
+                 color='red', linewidth=2)
+    axes[1].set_xlabel('Epoch', fontsize=12)
+    axes[1].set_ylabel('Loss', fontsize=12)
+    axes[1].set_title('Classification Loss', fontsize=14, fontweight='bold')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+    
+    axes[2].plot(history['reg_loss'], label='Regression Loss',
+                 color='teal', linewidth=2)
+    axes[2].set_xlabel('Epoch', fontsize=12)
+    axes[2].set_ylabel('Loss', fontsize=12)
+    axes[2].set_title('Regression Loss', fontsize=14, fontweight='bold')
+    axes[2].legend()
+    axes[2].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
 
-# Loss
-axes[0].plot(train_losses, label='Train Loss', linewidth=2)
-axes[0].plot(test_losses, label='Test Loss', linewidth=2)
-axes[0].set_xlabel('Epoch', fontweight='bold')
-axes[0].set_ylabel('Loss (MSE)', fontweight='bold')
-axes[0].set_title('Training Progress', fontweight='bold')
-axes[0].legend()
-axes[0].grid(alpha=0.3)
 
-# R² Score
-axes[1].plot(test_r2_scores, label='Test R²', linewidth=2, color='green')
-axes[1].axhline(y=0, color='red', linestyle='--', alpha=0.5)
-axes[1].set_xlabel('Epoch', fontweight='bold')
-axes[1].set_ylabel('R² Score', fontweight='bold')
-axes[1].set_title('R² Score Over Time', fontweight='bold')
-axes[1].legend()
-axes[1].grid(alpha=0.3)
+def plot_classification_results(results, class_names):
+    """Plot classification metrics and confusion matrix."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    metrics = {
+        'Accuracy': results['accuracy'],
+        'Precision': results['precision'],
+        'Recall': results['recall'],
+        'F1-Score': results['f1']
+    }
+    
+    axes[0].bar(metrics.keys(), metrics.values(), 
+               color=['blue', 'green', 'orange', 'red'])
+    axes[0].set_ylim([0, 1])
+    axes[0].set_ylabel('Score', fontsize=12)
+    axes[0].set_title('Classification Metrics', fontsize=14, fontweight='bold')
+    axes[0].grid(True, axis='y', alpha=0.3)
+    
+    for i, (metric, value) in enumerate(metrics.items()):
+        axes[0].text(i, value + 0.02, f'{value:.3f}', ha='center', fontsize=10)
+    
+    cm = results['confusion_matrix']
+    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[1],
+                xticklabels=class_names, yticklabels=class_names)
+    axes[1].set_xlabel('Predicted', fontsize=12)
+    axes[1].set_ylabel('Actual', fontsize=12)
+    axes[1].set_title('Confusion Matrix', fontsize=14, fontweight='bold')
+    
+    plt.tight_layout()
+    plt.show()
 
-plt.tight_layout()
-plt.show()
 
-# ============================================================================
-# 4.3 Final Evaluation
-# ============================================================================
-print("\n" + "-"*80)
-print("4.3 Final Model Evaluation")
-print("-"*80)
-
-model.eval()
-final_predictions = []
-final_targets = []
-
-with torch.no_grad():
-    for spike_batch, target_batch in test_loader:
-        spike_batch = spike_batch.permute(1, 0, 2).to(device)
+def plot_regression_results(results, scaler_y=None):
+    """Plot regression metrics and predictions."""
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Denormalize if scaler provided
+    if scaler_y is not None:
+        predictions = scaler_y.inverse_transform(
+            results['predictions'].reshape(-1, 1)).flatten()
+        targets = scaler_y.inverse_transform(
+            results['targets'].reshape(-1, 1)).flatten()
         
-        mem_rec, _, _ = model(spike_batch)
-        predictions = mem_rec.mean(dim=0).squeeze()
-        
-        final_predictions.extend(predictions.cpu().numpy())
-        final_targets.extend(target_batch.numpy())
-
-final_predictions = np.array(final_predictions)
-final_targets = np.array(final_targets)
-
-# Denormalize to original scale
-final_predictions_original = scaler_y.inverse_transform(
-    final_predictions.reshape(-1, 1)).flatten()
-final_targets_original = scaler_y.inverse_transform(
-    final_targets.reshape(-1, 1)).flatten()
-
-# Calculate metrics
-mse = mean_squared_error(final_targets_original, final_predictions_original)
-rmse = np.sqrt(mse)
-mae = mean_absolute_error(final_targets_original, final_predictions_original)
-r2 = r2_score(final_targets_original, final_predictions_original)
-
-print("\n" + "="*80)
-print("FINAL PERFORMANCE")
-print("="*80)
-print(f"\nRMSE: {rmse:.4f}%")
-print(f"MAE: {mae:.4f}%")
-print(f"R² Score: {r2:.4f}")
-print(f"Error rate: {(mae/final_targets_original.mean())*100:.2f}% of mean")
-
-# ============================================================================
-# 4.4 Prediction Visualization
-# ============================================================================
-print("\n" + "-"*80)
-print("4.4 Prediction Visualization")
-print("-"*80)
-
-fig, axes = plt.subplots(2, 2, figsize=(16, 12))
-
-# 1. Predicted vs Actual
-axes[0, 0].scatter(final_targets_original, final_predictions_original, 
-                   alpha=0.6, s=50, edgecolors='black', linewidth=0.5)
-axes[0, 0].plot([final_targets_original.min(), final_targets_original.max()],
-                [final_targets_original.min(), final_targets_original.max()],
+        # Recalculate metrics in original scale
+        rmse = np.sqrt(mean_squared_error(targets, predictions))
+        mae = mean_absolute_error(targets, predictions)
+        r2 = r2_score(targets, predictions)
+    else:
+        predictions = results['predictions']
+        targets = results['targets']
+        rmse = results['rmse']
+        mae = results['mae']
+        r2 = results['r2']
+    
+    metrics = {'RMSE': rmse, 'MAE': mae, 'R²': r2}
+    
+    colors = ['red', 'orange', 'green']
+    bars = axes[0].bar(metrics.keys(), metrics.values(), color=colors)
+    axes[0].set_ylabel('Score', fontsize=12)
+    axes[0].set_title('Regression Metrics', fontsize=14, fontweight='bold')
+    axes[0].grid(True, axis='y', alpha=0.3)
+    
+    for bar, (metric, value) in zip(bars, metrics.items()):
+        height = bar.get_height()
+        axes[0].text(bar.get_x() + bar.get_width()/2., height + 0.01,
+                     f'{value:.3f}', ha='center', fontsize=10)
+    
+    axes[1].scatter(targets, predictions, alpha=0.6, s=50)
+    
+    min_val = min(targets.min(), predictions.min())
+    max_val = max(targets.max(), predictions.max())
+    axes[1].plot([min_val, max_val], [min_val, max_val], 
                 'r--', linewidth=2, label='Perfect Prediction')
-axes[0, 0].set_xlabel('Actual Concentration (%)', fontweight='bold')
-axes[0, 0].set_ylabel('Predicted Concentration (%)', fontweight='bold')
-axes[0, 0].set_title('Predicted vs Actual', fontweight='bold')
-axes[0, 0].legend()
-axes[0, 0].grid(alpha=0.3)
+    
+    axes[1].set_xlabel('Actual Concentration (%)', fontsize=12)
+    axes[1].set_ylabel('Predicted Concentration (%)', fontsize=12)
+    axes[1].set_title('Predictions vs Actual', fontsize=14, fontweight='bold')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    plt.show()
 
-# 2. Colored by concentration
-scatter = axes[0, 1].scatter(final_targets_original, final_predictions_original, 
-                             c=final_targets_original, cmap='viridis', s=50, alpha=0.6)
-axes[0, 1].plot([final_targets_original.min(), final_targets_original.max()],
-                [final_targets_original.min(), final_targets_original.max()],
-                'r--', linewidth=2)
-axes[0, 1].set_xlabel('Actual Concentration (%)', fontweight='bold')
-axes[0, 1].set_ylabel('Predicted Concentration (%)', fontweight='bold')
-axes[0, 1].set_title('Predictions by Concentration', fontweight='bold')
-plt.colorbar(scatter, ax=axes[0, 1], label='Concentration (%)')
-axes[0, 1].grid(alpha=0.3)
-
-# 3. Residuals
-residuals = final_predictions_original - final_targets_original
-axes[1, 0].scatter(final_predictions_original, residuals, alpha=0.6, s=50)
-axes[1, 0].axhline(y=0, color='r', linestyle='--', linewidth=2)
-axes[1, 0].set_xlabel('Predicted Concentration (%)', fontweight='bold')
-axes[1, 0].set_ylabel('Residuals (%)', fontweight='bold')
-axes[1, 0].set_title('Residual Plot', fontweight='bold')
-axes[1, 0].grid(alpha=0.3)
-
-# 4. Residuals distribution
-axes[1, 1].hist(residuals, bins=30, edgecolor='black', alpha=0.7)
-axes[1, 1].axvline(x=0, color='r', linestyle='--', linewidth=2)
-axes[1, 1].set_xlabel('Residuals (%)', fontweight='bold')
-axes[1, 1].set_ylabel('Frequency', fontweight='bold')
-axes[1, 1].set_title('Residuals Distribution', fontweight='bold')
-axes[1, 1].grid(alpha=0.3, axis='y')
-
-plt.tight_layout()
-plt.show()
 
 # ============================================================================
-# 4.5 Spiking Activity Analysis
-# ============================================================================
-print("\n" + "-"*80)
-print("4.5 Spiking Activity Analysis")
-print("-"*80)
-
-model.eval()
-with torch.no_grad():
-    sample_batch = spike_test[:, :batch_size, :].to(device)
-    mem_rec, spk_rec1, spk_rec2 = model(sample_batch)
-
-spk_rec1_np = spk_rec1.cpu().numpy()
-spk_rec2_np = spk_rec2.cpu().numpy()
-
-spike_rate_layer1 = spk_rec1_np.mean()
-spike_rate_layer2 = spk_rec2_np.mean()
-
-print(f"\nSpike rates:")
-print(f"  Hidden Layer 1: {spike_rate_layer1:.4f}")
-print(f"  Hidden Layer 2: {spike_rate_layer2:.4f}")
-
-# Spike raster plots
-fig, axes = plt.subplots(2, 1, figsize=(14, 8))
-fig.suptitle('Spiking Activity in Hidden Layers',
-             fontsize=14, fontweight='bold')
-
-sample_idx = 0
-
-# Layer 1
-for neuron_idx in range(hidden_size1):
-    spike_times = np.where(spk_rec1_np[:, sample_idx, neuron_idx] > 0)[0]
-    axes[0].scatter(spike_times, [neuron_idx] * len(spike_times),
-                   marker='|', s=50, color='blue', alpha=0.6)
-
-axes[0].set_ylabel('Neuron Index', fontweight='bold')
-axes[0].set_title(f'Hidden Layer 1 ({hidden_size1} neurons)',
-                 fontweight='bold')
-axes[0].grid(alpha=0.3, axis='x')
-
-# Layer 2
-for neuron_idx in range(hidden_size2):
-    spike_times = np.where(spk_rec2_np[:, sample_idx, neuron_idx] > 0)[0]
-    axes[1].scatter(spike_times, [neuron_idx] * len(spike_times),
-                   marker='|', s=50, color='green', alpha=0.6)
-
-axes[1].set_xlabel('Time Step', fontweight='bold')
-axes[1].set_ylabel('Neuron Index', fontweight='bold')
-axes[1].set_title(f'Hidden Layer 2 ({hidden_size2} neurons)',
-                 fontweight='bold')
-axes[1].grid(alpha=0.3, axis='x')
-
-plt.tight_layout()
-plt.show()
-
-# ============================================================================
-# FINAL SUMMARY
+# MAIN FUNCTION
 # ============================================================================
 
-print("\n" + "="*80)
-print("TIME SERIES SNN REGRESSION - FINAL SUMMARY")
-print("="*80)
+def main(selected_arch_name=None):
+    """Main training pipeline."""
+    print("="*80)
+    print("MULTITASK TIME SERIES SNN")
+    print("Wine Classification + Ethanol Regression")
+    print("="*80)
+    
+    # Architecture selection
+    if selected_arch_name is None:
+        print_available_architectures()
+        available_archs = get_available_architectures()
+        
+        if not available_archs:
+            print("\nERROR: No architectures found!")
+            sys.exit(1)
+        
+        arch_list = list(available_archs.keys())
+        print("\nSelect an architecture:")
+        for i, arch_name in enumerate(arch_list, 1):
+            print(f"  {i}. {arch_name}")
+        
+        while True:
+            try:
+                choice = input(f"\nEnter choice (1-{len(arch_list)}): ").strip()
+                choice_idx = int(choice) - 1
+                if 0 <= choice_idx < len(arch_list):
+                    selected_arch_name = arch_list[choice_idx]
+                    break
+            except (ValueError, KeyboardInterrupt):
+                print("\nTraining cancelled.")
+                sys.exit(0)
+    
+    print(f"\n✓ Selected architecture: {selected_arch_name}")
+    
+    # Load architecture
+    arch_module = load_architecture(selected_arch_name)
+    MultitaskSNN = arch_module.MultitaskSNN
+    
+    # Paths
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    models_dir = os.path.join(base_dir, "model")
+    os.makedirs(models_dir, exist_ok=True)
+    data_path = os.path.join(base_dir, "data", "wine")
+    
+    print(f"\nUsing device: {device}")
+    print(f"Data path: {data_path}")
+    
+    # ========================================================================
+    # LOAD DATA
+    # ========================================================================
+    print("\n" + "="*80)
+    print("LOADING TIME SERIES DATA")
+    print("="*80)
+    
+    print("\nLoading wine dataset...")
+    wine_df = load_wine_timeseries_dataset(data_path)
+    
+    if wine_df.empty:
+        print(f"\nERROR: No wine data found!")
+        sys.exit(1)
+    
+    print("\nLoading ethanol dataset...")
+    ethanol_df = load_ethanol_timeseries_dataset(data_path)
+    
+    if ethanol_df.empty:
+        print(f"\nERROR: No ethanol data found!")
+        sys.exit(1)
+    
+    # Remove stabilization period
+    print(f"\nRemoving first {STABILIZATION_PERIOD} time points...")
+    wine_df = remove_stabilization_period(wine_df, STABILIZATION_PERIOD)
+    ethanol_df = remove_stabilization_period(ethanol_df, STABILIZATION_PERIOD)
+    
+    # ========================================================================
+    # PREPARE TIME SERIES
+    # ========================================================================
+    print("\n" + "="*80)
+    print("PREPARING TIME SERIES SEQUENCES")
+    print("="*80)
+    
+    print(f"\nConfiguration:")
+    print(f"  Sequence length: {SEQUENCE_LENGTH}")
+    print(f"  Downsample factor: {DOWNSAMPLE_FACTOR}")
+    print(f"  Features: {len(SENSOR_COLS)} (MQ sensors only)")
+    print(f"  Encoding: {ENCODING_TYPE}")
+    
+    # Wine sequences
+    print("\nPreparing wine sequences...")
+    wine_sequences, wine_labels, wine_metadata = prepare_time_series_sequences(
+        wine_df, SENSOR_COLS, SEQUENCE_LENGTH, DOWNSAMPLE_FACTOR
+    )
+    
+    # Ethanol sequences
+    print("Preparing ethanol sequences...")
+    ethanol_sequences, ethanol_conc, ethanol_metadata = prepare_time_series_sequences(
+        ethanol_df, SENSOR_COLS, SEQUENCE_LENGTH, DOWNSAMPLE_FACTOR
+    )
+    
+    print(f"\nWine sequences: {len(wine_sequences)}")
+    print(f"Ethanol sequences: {len(ethanol_sequences)}")
+    
+    # Clean and normalize
+    print("\nNormalizing wine sequences...")
+    wine_sequences_norm, wine_scaler = clean_and_normalize_sequences(wine_sequences)
+    
+    print("Normalizing ethanol sequences...")
+    ethanol_sequences_norm, ethanol_scaler = clean_and_normalize_sequences(ethanol_sequences)
+    
+    # Encode labels
+    wine_label_encoder = LabelEncoder()
+    wine_labels_encoded = wine_label_encoder.fit_transform(wine_labels)
+    
+    # Normalize ethanol concentrations
+    ethanol_scaler_y = MinMaxScaler(feature_range=(0, 1))
+    ethanol_conc_norm = ethanol_scaler_y.fit_transform(
+        np.array(ethanol_conc).reshape(-1, 1)
+    ).flatten()
+    
+    print(f"\nWine classes: {wine_label_encoder.classes_}")
+    print(f"Ethanol concentration range: {min(ethanol_conc):.1f}% - {max(ethanol_conc):.1f}%")
+    
+    # ========================================================================
+    # TRAIN-TEST SPLIT
+    # ========================================================================
+    print("\n" + "="*80)
+    print("TRAIN-TEST SPLIT")
+    print("="*80)
+    
+    # Wine split
+    X_train_wine, X_test_wine, y_train_wine, y_test_wine = train_test_split(
+        wine_sequences_norm, wine_labels_encoded,
+        test_size=0.2, random_state=42, stratify=wine_labels_encoded
+    )
+    
+    # Ethanol split
+    X_train_ethanol, X_test_ethanol, y_train_ethanol, y_test_ethanol = train_test_split(
+        ethanol_sequences_norm, ethanol_conc_norm,
+        test_size=0.2, random_state=42
+    )
+    
+    print(f"\nWine - Train: {len(X_train_wine)}, Test: {len(X_test_wine)}")
+    print(f"Ethanol - Train: {len(X_train_ethanol)}, Test: {len(X_test_ethanol)}")
+    
+    # ========================================================================
+    # SPIKE ENCODING
+    # ========================================================================
+    print("\n" + "="*80)
+    print("SPIKE ENCODING")
+    print("="*80)
+    
+    print(f"\nEncoding type: {ENCODING_TYPE}")
+    
+    if ENCODING_TYPE == 'direct':
+        print("\nEncoding wine training data...")
+        wine_train_spikes = encode_time_series_direct(X_train_wine)
+        print("Encoding wine test data...")
+        wine_test_spikes = encode_time_series_direct(X_test_wine)
+        
+        print("\nEncoding ethanol training data...")
+        ethanol_train_spikes = encode_time_series_direct(X_train_ethanol)
+        print("Encoding ethanol test data...")
+        ethanol_test_spikes = encode_time_series_direct(X_test_ethanol)
+        
+    elif ENCODING_TYPE == 'delta':
+        print("\nEncoding wine training data...")
+        wine_train_spikes = encode_time_series_delta(X_train_wine)
+        print("Encoding wine test data...")
+        wine_test_spikes = encode_time_series_delta(X_test_wine)
+        
+        print("\nEncoding ethanol training data...")
+        ethanol_train_spikes = encode_time_series_delta(X_train_ethanol)
+        print("Encoding ethanol test data...")
+        ethanol_test_spikes = encode_time_series_delta(X_test_ethanol)
+        
+    else:  # rate encoding
+        print("\nEncoding wine training data...")
+        wine_train_spikes = encode_time_series_rate(X_train_wine, num_steps=100)
+        print("Encoding wine test data...")
+        wine_test_spikes = encode_time_series_rate(X_test_wine, num_steps=100)
+        
+        print("\nEncoding ethanol training data...")
+        ethanol_train_spikes = encode_time_series_rate(X_train_ethanol, num_steps=100)
+        print("Encoding ethanol test data...")
+        ethanol_test_spikes = encode_time_series_rate(X_test_ethanol, num_steps=100)
+    
+    print(f"\nWine spikes shape: {wine_train_spikes.shape}")
+    print(f"Ethanol spikes shape: {ethanol_train_spikes.shape}")
+    
+    # Calculate spike statistics
+    wine_spike_rate = wine_train_spikes.sum().item() / wine_train_spikes.numel()
+    ethanol_spike_rate = ethanol_train_spikes.sum().item() / ethanol_train_spikes.numel()
+    
+    print(f"\nWine spike rate: {wine_spike_rate:.4f}")
+    print(f"Ethanol spike rate: {ethanol_spike_rate:.4f}")
+    
+    # ========================================================================
+    # CREATE DATALOADERS
+    # ========================================================================
+    print("\n" + "="*80)
+    print("CREATING DATALOADERS")
+    print("="*80)
+    
+    # Permute to [batch, time, features] for DataLoader
+    wine_train_spikes = wine_train_spikes.permute(1, 0, 2)
+    wine_test_spikes = wine_test_spikes.permute(1, 0, 2)
+    ethanol_train_spikes = ethanol_train_spikes.permute(1, 0, 2)
+    ethanol_test_spikes = ethanol_test_spikes.permute(1, 0, 2)
+    
+    wine_train_loader, wine_test_loader = create_dataloaders(
+        wine_train_spikes, torch.LongTensor(y_train_wine),
+        wine_test_spikes, torch.LongTensor(y_test_wine),
+        batch_size=BATCH_SIZE
+    )
+    
+    ethanol_train_loader, ethanol_test_loader = create_dataloaders(
+        ethanol_train_spikes, torch.FloatTensor(y_train_ethanol),
+        ethanol_test_spikes, torch.FloatTensor(y_test_ethanol),
+        batch_size=BATCH_SIZE
+    )
+    
+    print(f"\nWine train batches: {len(wine_train_loader)}")
+    print(f"Ethanol train batches: {len(ethanol_train_loader)}")
+    
+    # ========================================================================
+    # CREATE MODEL
+    # ========================================================================
+    print("\n" + "="*80)
+    print("CREATING MULTITASK SNN MODEL")
+    print("="*80)
+    
+    input_size = len(SENSOR_COLS)
+    
+    model = MultitaskSNN(
+        input_size=input_size,
+        shared_hidden=SHARED_HIDDEN,
+        classification_hidden=CLASS_HIDDEN,
+        regression_hidden=REG_HIDDEN,
+        num_classes=NUM_CLASSES,
+        beta=BETA
+    ).to(device)
+    
+    print(model.get_architecture_summary())
+    
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\nTotal parameters: {total_params:,}")
+    
+    # ========================================================================
+    # TRAINING
+    # ========================================================================
+    print("\n" + "="*80)
+    print("TRAINING MULTITASK SNN")
+    print("="*80)
+    
+    print(f"\nTraining configuration:")
+    print(f"  Epochs: {NUM_EPOCHS}")
+    print(f"  Batch size: {BATCH_SIZE}")
+    print(f"  Learning rate: {LEARNING_RATE}")
+    print(f"  Regression weight: {REG_WEIGHT}")
+    
+    classification_criterion = nn.CrossEntropyLoss()
+    regression_criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    
+    history = {
+        'total_loss': [],
+        'class_loss': [],
+        'reg_loss': []
+    }
+    
+    print("\nStarting training...")
+    print("-" * 80)
+    
+    for epoch in range(NUM_EPOCHS):
+        avg_loss, avg_class_loss, avg_reg_loss = train_multitask_epoch(
+            model, wine_train_loader, ethanol_train_loader, device,
+            classification_criterion, regression_criterion,
+            optimizer, reg_weight=REG_WEIGHT
+        )
+        
+        history['total_loss'].append(avg_loss)
+        history['class_loss'].append(avg_class_loss)
+        history['reg_loss'].append(avg_reg_loss)
+        
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            print(f"Epoch [{epoch+1:3d}/{NUM_EPOCHS}] | "
+                  f"Total: {avg_loss:.4f} | "
+                  f"Class: {avg_class_loss:.4f} | "
+                  f"Reg: {avg_reg_loss:.4f}")
+    
+    print("\n✓ Training completed!")
+    
+    # ========================================================================
+    # EVALUATION
+    # ========================================================================
+    print("\n" + "="*80)
+    print("EVALUATION")
+    print("="*80)
+    
+    # Classification
+    print("\n--- WINE CLASSIFICATION RESULTS ---")
+    class_results = evaluate_classification(model, wine_test_loader, device)
+    print(f"Accuracy:  {class_results['accuracy']:.4f}")
+    print(f"Precision: {class_results['precision']:.4f}")
+    print(f"Recall:    {class_results['recall']:.4f}")
+    print(f"F1-Score:  {class_results['f1']:.4f}")
+    
+    # Regression
+    print("\n--- ETHANOL CONCENTRATION REGRESSION RESULTS ---")
+    reg_results = evaluate_regression(model, ethanol_test_loader, device)
+    
+    # Denormalize for display
+    reg_results_denorm = reg_results.copy()
+    reg_results_denorm['predictions'] = ethanol_scaler_y.inverse_transform(
+        reg_results['predictions'].reshape(-1, 1)).flatten()
+    reg_results_denorm['targets'] = ethanol_scaler_y.inverse_transform(
+        reg_results['targets'].reshape(-1, 1)).flatten()
+    
+    rmse_denorm = np.sqrt(mean_squared_error(
+        reg_results_denorm['targets'], reg_results_denorm['predictions']))
+    mae_denorm = mean_absolute_error(
+        reg_results_denorm['targets'], reg_results_denorm['predictions'])
+    r2_denorm = r2_score(
+        reg_results_denorm['targets'], reg_results_denorm['predictions'])
+    
+    print(f"RMSE: {rmse_denorm:.4f}%")
+    print(f"MAE:  {mae_denorm:.4f}%")
+    print(f"R²:   {r2_denorm:.4f}")
+    
+    # ========================================================================
+    # SAVE MODEL
+    # ========================================================================
+    print("\n" + "="*80)
+    print("SAVING MODEL")
+    print("="*80)
+    
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    
+    model_name = (f"{selected_arch_name}_timeseries_"
+                  f"seq{SEQUENCE_LENGTH}_"
+                  f"enc{ENCODING_TYPE}_"
+                  f"beta{BETA}_"
+                  f"epochs{NUM_EPOCHS}_"
+                  f"lr{LEARNING_RATE}_"
+                  f"bs{BATCH_SIZE}_"
+                  f"rw{REG_WEIGHT}_"
+                  f"{timestamp}.pth")
+    
+    model_path = os.path.join(models_dir, model_name)
+    
+    torch.save({
+        'model_state_dict': model.state_dict(),
+        'architecture_name': selected_arch_name,
+        'architecture': {
+            'input_size': input_size,
+            'shared_hidden': SHARED_HIDDEN,
+            'classification_hidden': CLASS_HIDDEN,
+            'regression_hidden': REG_HIDDEN,
+            'num_classes': NUM_CLASSES,
+            'beta': BETA
+        },
+        'hyperparameters': {
+            'learning_rate': LEARNING_RATE,
+            'num_epochs': NUM_EPOCHS,
+            'batch_size': BATCH_SIZE,
+            'reg_weight': REG_WEIGHT,
+            'sequence_length': SEQUENCE_LENGTH,
+            'downsample_factor': DOWNSAMPLE_FACTOR,
+            'encoding_type': ENCODING_TYPE
+        },
+        'results': {
+            'classification': class_results,
+            'regression': {
+                'mse': reg_results['mse'],
+                'rmse': rmse_denorm,
+                'mae': mae_denorm,
+                'r2': r2_denorm,
+                'predictions': reg_results_denorm['predictions'],
+                'targets': reg_results_denorm['targets']
+            }
+        },
+        'history': history,
+        'scalers': {
+            'wine_scaler': wine_scaler,
+            'ethanol_scaler': ethanol_scaler,
+            'ethanol_scaler_y': ethanol_scaler_y
+        },
+        'label_encoder': wine_label_encoder,
+        'sensor_cols': SENSOR_COLS
+    }, model_path)
+    
+    print(f"\n✓ Model saved to: {model_path}")
+    
+    # ========================================================================
+    # VISUALIZATION
+    # ========================================================================
+    print("\n" + "="*80)
+    print("GENERATING VISUALIZATIONS")
+    print("="*80)
+    
+    # Training history
+    plot_training_history(history)
+    
+    # Classification results
+    class_names = wine_label_encoder.classes_
+    plot_classification_results(class_results, class_names)
+    
+    # Regression results
+    plot_regression_results(reg_results, ethanol_scaler_y)
+    
+    # ========================================================================
+    # FINAL SUMMARY
+    # ========================================================================
+    print("\n" + "="*80)
+    print("MULTITASK TIME SERIES SNN - FINAL SUMMARY")
+    print("="*80)
+    
+    print(f"""
+✓ TRAINING COMPLETED SUCCESSFULLY!
 
-print(f"""
-✓ SUCCESSFULLY COMPLETED TIME SERIES ETHANOL CONCENTRATION REGRESSION!
-
-KEY APPROACH - TIME SERIES vs AGGREGATED:
-==========================================
-1. DATA REPRESENTATION:
-   AGGREGATED: Mean, std, min, max → 57 features per file
-   TIME SERIES: Full temporal sequences → {SEQUENCE_LENGTH} timesteps × {num_features} features
-   
-2. TEMPORAL INFORMATION:
-   AGGREGATED: Lost temporal dynamics (only statistics)
-   TIME SERIES: Preserved temporal patterns and sensor response dynamics
-   
-3. SPIKE ENCODING:
-   AGGREGATED: Latency encoding on 57 statistical features
-   TIME SERIES: Direct encoding on {SEQUENCE_LENGTH} temporal timesteps
-   
-4. SNN PROCESSING:
-   AGGREGATED: 25 SNN timesteps for latency encoding
-   TIME SERIES: {SEQUENCE_LENGTH} SNN timesteps (matches sequence length)
-   
-5. TASK:
-   Both: Regression for ethanol concentration prediction
-   Input size: TIME SERIES uses {num_features} features/timestep vs 57 aggregate features
+APPROACH: TIME SERIES DIRECT PROCESSING
+========================================
+- Full temporal sequences ({SEQUENCE_LENGTH} timesteps)
+- Direct spike encoding (not aggregated statistics)
+- Only MQ sensor data (6 features, no temperature/humidity)
+- Preserves temporal dynamics throughout training
 
 ARCHITECTURE:
 =============
-- Input: {num_features} features per timestep
-- Hidden Layer 1: {hidden_size1} LIF neurons
-- Hidden Layer 2: {hidden_size2} LIF neurons
-- Output: {output_size} neuron (continuous concentration)
+- Input: {input_size} features per timestep
+- Shared hidden: {SHARED_HIDDEN} neurons
+- Classification hidden: {CLASS_HIDDEN} neurons
+- Regression hidden: {REG_HIDDEN} neurons
 - Total timesteps: {SEQUENCE_LENGTH}
-- Beta (decay): {beta}
+- Encoding: {ENCODING_TYPE}
 
-RESULTS:
-========
-- RMSE: {rmse:.4f}%
-- MAE: {mae:.4f}%
-- R² Score: {r2:.4f}
-- Error rate: {(mae/final_targets_original.mean())*100:.2f}% of mean
-- Training samples: {len(X_train)}
-- Test samples: {len(X_test)}
+CLASSIFICATION RESULTS (Wine Quality):
+======================================
+- Accuracy:  {class_results['accuracy']:.4f}
+- Precision: {class_results['precision']:.4f}
+- Recall:    {class_results['recall']:.4f}
+- F1-Score:  {class_results['f1']:.4f}
+
+REGRESSION RESULTS (Ethanol Concentration):
+==========================================
+- RMSE: {rmse_denorm:.4f}%
+- MAE:  {mae_denorm:.4f}%
+- R²:   {r2_denorm:.4f}
 
 DATASET:
 ========
-- Concentrations: {sorted(np.unique(y_concentration))}%
-- Sensors: MQ-3, MQ-4, MQ-6 (2 arrays)
-- Environmental: Temperature, Humidity
+- Wine samples: {len(wine_sequences)}
+- Ethanol samples: {len(ethanol_sequences)}
+- Train split: 80%
+- Test split: 20%
+- Features: {len(SENSOR_COLS)} MQ sensors
 - Sequence length: {SEQUENCE_LENGTH} timesteps
 - Downsample factor: {DOWNSAMPLE_FACTOR}
 
 TRAINING:
 =========
-- Epochs: {num_epochs}
-- Batch size: {batch_size}
-- Learning rate: {learning_rate}
-- Optimizer: Adam
-- Loss: MSE (Mean Squared Error)
-- Encoding: {ENCODING_TYPE}
+- Epochs: {NUM_EPOCHS}
+- Batch size: {BATCH_SIZE}
+- Learning rate: {LEARNING_RATE}
+- Regression weight: {REG_WEIGHT}
+- Total parameters: {total_params:,}
 
-ADVANTAGES OF TIME SERIES APPROACH:
-====================================
-✓ Preserves temporal sensor dynamics
-✓ Captures transient responses
-✓ Maintains sequential information
-✓ Better represents biological sensing
-✓ Utilizes SNN's temporal processing capabilities
-✓ No information loss from aggregation
+KEY ADVANTAGES:
+===============
+✓ Temporal dynamics preserved (no aggregation)
+✓ Biological sensing patterns maintained
+✓ SNN temporal processing fully utilized
+✓ Multitask learning with shared representations
+✓ Direct spike encoding from time series
+✓ Only relevant sensor features (no environmental)
+
+Model saved at: {model_path}
 """)
+    
+    print("\n" + "="*80)
+    print("ALL DONE! ✅")
+    print("="*80)
 
-# ============================================================================
-# SAVE TRAINED MODEL
-# ============================================================================
-print("\n" + "-"*80)
-print("SAVING TRAINED MODEL")
-print("-"*80)
 
-model_dir = "trained_models"
-os.makedirs(model_dir, exist_ok=True)
-
-model_filename = (
-    f"ethanol_timeseries_snn_"
-    f"seq{SEQUENCE_LENGTH}_"
-    f"beta{beta}_"
-    f"bs{batch_size}_"
-    f"lr{learning_rate}_"
-    f"ep{num_epochs}.pth"
-)
-
-model_path = os.path.join(model_dir, model_filename)
-torch.save({
-    'model_state_dict': model.state_dict(),
-    'input_size': input_size,
-    'hidden1': hidden_size1,
-    'hidden2': hidden_size2,
-    'output_size': output_size,
-    'beta': beta,
-    'scaler_X': scaler_X,
-    'scaler_y': scaler_y,
-    'sequence_length': SEQUENCE_LENGTH,
-    'downsample_factor': DOWNSAMPLE_FACTOR
-}, model_path)
-
-print(f"\n✓ Model saved successfully at: {model_path}")
-
-# ============================================================================
-# END OF SCRIPT
-# ============================================================================
-
-print("\n" + "="*80)
-print("EXPERIMENT COMPLETED SUCCESSFULLY ✅")
-print("="*80)
-
-print(f"""
-Summary:
----------
-Model Type       : Spiking Neural Network (Leaky Integrate-and-Fire)
-Dataset          : Ethanol Concentration Time-Series
-Task             : Regression (Continuous Concentration Prediction)
-Timesteps        : {SEQUENCE_LENGTH}
-Features         : {num_features} per timestep
-Encoding Type    : {ENCODING_TYPE} (threshold-based)
-Optimizer        : Adam (lr={learning_rate})
-Training Epochs  : {num_epochs}
-Final RMSE       : {rmse:.4f}%
-Final MAE        : {mae:.4f}%
-Final R² Score   : {r2:.4f}
-Model Path       : {model_path}
-
-Key Differences from Aggregated Approach:
-------------------------------------------
-✓ Uses FULL time series data (not statistics)
-✓ Processes {SEQUENCE_LENGTH} timesteps (not 25)
-✓ Direct spike encoding (not latency encoding)
-✓ Input: {num_features} features/step (not 57 aggregate features)
-✓ Preserves temporal dynamics throughout training
-✓ Better captures sensor response patterns
-
-Next Steps:
------------
-1. Try different encoding methods:
-   - Rate encoding: spike frequency represents value
-   - Latency encoding: spike timing represents value
-   - Delta modulation: encode changes over time
-
-2. Experiment with architecture:
-   - Add recurrent connections for temporal memory
-   - Try different beta values for membrane dynamics
-   - Adjust hidden layer sizes
-
-3. Data augmentation:
-   - Add temporal jittering
-   - Introduce noise for robustness
-   - Augment minority concentration classes
-
-4. Multi-task learning:
-   - Combine with wine quality classification
-   - Predict multiple analytes simultaneously
-   - Joint training for related tasks
-
-5. Analysis:
-   - Visualize learned temporal features
-   - Analyze neuron selectivity
-   - Study spike timing patterns
-
-✓ All tasks completed successfully!
-""")
-
-print("\n" + "="*80)
-print("Thank you for using the Time Series SNN Regression Framework!")
-print("="*80)
+if __name__ == "__main__":
+    if len(sys.argv) > 1:
+        main(selected_arch_name=sys.argv[1])
+    else:
+        main()

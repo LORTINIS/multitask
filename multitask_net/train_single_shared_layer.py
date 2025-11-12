@@ -505,11 +505,12 @@ def main(selected_arch_name=None):
     # CONFIGURATION
     # ========================================================================
     # Paths (relative to multitask_net directory)
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # Go up to multitask folder
+    base_dir= os.path.dirname(os.path.abspath(__file__))
+    models_dir = os.path.join(base_dir, "model")
+    os.makedirs(models_dir, exist_ok=True)  # Go up to multitask folder
     wine_data_path = os.path.join(base_dir, "data", "wine")
     ethanol_data_path = os.path.join(base_dir, "data", "wine")  # Ethanol is inside wine folder
-    models_dir = "models"
-    os.makedirs(models_dir, exist_ok=True)
+    
     
     print(f"Wine data path: {wine_data_path}")
     print(f"Ethanol data path: {ethanol_data_path}")

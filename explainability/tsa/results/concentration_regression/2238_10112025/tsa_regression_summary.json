@@ -1,0 +1,283 @@
+{
+  "timestamp": "2238_10112025",
+  "datetime": "2025-11-10T22:38:32.719169",
+  "device": "cuda",
+  "args": {
+    "checkpoint": "../../trained_models/ethanol_concentration_snn_6features_seq1000_beta0.9320_bs8_lr0.009479_ep100.pth",
+    "spike_data_dir": "../../data/spike_data_ethanol",
+    "sample_index": 0,
+    "num_random_samples": 5,
+    "full_dataset_analysis": false
+  },
+  "hyperparameters_used": {
+    "beta": 0.9320405786091646,
+    "learning_rate": 0.009478855050990368,
+    "batch_size": 8,
+    "dropout": 0.0359117786731738,
+    "encoding_type": "direct",
+    "optimizer": "AdamW"
+  },
+  "model": {
+    "checkpoint": "C:\\Users\\austi\\multitask\\trained_models\\ethanol_concentration_snn_6features_seq1000_beta0.9320_bs8_lr0.009479_ep100.pth",
+    "input_size": 6,
+    "hidden1": 28,
+    "hidden2": 14,
+    "output_size": 1,
+    "beta": 0.9320405786091646,
+    "scalers_available": {
+      "X": false,
+      "y": true
+    }
+  },
+  "selected_sample": {
+    "index": 0,
+    "true_concentration": 15.0,
+    "predicted_concentration": 14.634306907653809,
+    "membrane_sum": 0.717595100402832,
+    "prediction_error": 0.3656930923461914,
+    "shape": [
+      1000,
+      6
+    ]
+  },
+  "random_samples": [
+    {
+      "index": 0,
+      "true_concentration": 15.0,
+      "predicted_concentration": 14.634306907653809,
+      "membrane_sum": 0.717595100402832,
+      "prediction_error": 0.3656930923461914
+    },
+    {
+      "index": 4,
+      "true_concentration": 1.0,
+      "predicted_concentration": 0.8590500699356198,
+      "membrane_sum": -0.007418417371809483,
+      "prediction_error": 0.14094993006438017
+    },
+    {
+      "index": 5,
+      "true_concentration": 20.0,
+      "predicted_concentration": 16.902007043361664,
+      "membrane_sum": 0.8369477391242981,
+      "prediction_error": 3.097992956638336
+    },
+    {
+      "index": 1,
+      "true_concentration": 20.0,
+      "predicted_concentration": 16.902007043361664,
+      "membrane_sum": 0.8369477391242981,
+      "prediction_error": 3.097992956638336
+    },
+    {
+      "index": 9,
+      "true_concentration": 5.0,
+      "predicted_concentration": 0.19019254669547075,
+      "membrane_sum": -0.042621444910764694,
+      "prediction_error": 4.809807453304529
+    }
+  ],
+  "perturbation_analysis": {
+    "description": "Analysis of how removing spikes affects concentration predictions",
+    "baseline": {
+      "true_concentration": 15.0,
+      "predicted_concentration": 14.634306907653809,
+      "membrane_potential": 0.717595100402832,
+      "prediction_error": 0.3656930923461914
+    },
+    "k_values_tested": [
+      1,
+      6,
+      11,
+      16,
+      21,
+      26,
+      31,
+      36,
+      41,
+      46
+    ],
+    "top_k_deletions": {
+      "results": [
+        {
+          "k": 1,
+          "predicted_concentration": 14.633400917053223,
+          "membrane_potential": 0.7175474166870117,
+          "concentration_change": -0.0009059906005859375,
+          "absolute_change": 0.0009059906005859375,
+          "prediction_error": 0.36659908294677734
+        },
+        {
+          "k": 6,
+          "predicted_concentration": 14.934629201889038,
+          "membrane_potential": 0.7334015369415283,
+          "concentration_change": 0.3003222942352295,
+          "absolute_change": 0.3003222942352295,
+          "prediction_error": 0.06537079811096191
+        },
+        {
+          "k": 11,
+          "predicted_concentration": 15.102324664592743,
+          "membrane_potential": 0.7422276139259338,
+          "concentration_change": 0.4680177569389343,
+          "absolute_change": 0.4680177569389343,
+          "prediction_error": 0.10232466459274292
+        },
+        {
+          "k": 16,
+          "predicted_concentration": 15.346585392951965,
+          "membrane_potential": 0.755083441734314,
+          "concentration_change": 0.7122784852981567,
+          "absolute_change": 0.7122784852981567,
+          "prediction_error": 0.34658539295196533
+        },
+        {
+          "k": 21,
+          "predicted_concentration": 15.42484825849533,
+          "membrane_potential": 0.7592025399208069,
+          "concentration_change": 0.7905413508415222,
+          "absolute_change": 0.7905413508415222,
+          "prediction_error": 0.4248482584953308
+        },
+        {
+          "k": 26,
+          "predicted_concentration": 15.5459486246109,
+          "membrane_potential": 0.7655762434005737,
+          "concentration_change": 0.9116417169570923,
+          "absolute_change": 0.9116417169570923,
+          "prediction_error": 0.5459486246109009
+        },
+        {
+          "k": 31,
+          "predicted_concentration": 15.658854305744171,
+          "membrane_potential": 0.7715186476707458,
+          "concentration_change": 1.0245473980903625,
+          "absolute_change": 1.0245473980903625,
+          "prediction_error": 0.6588543057441711
+        },
+        {
+          "k": 36,
+          "predicted_concentration": 15.73069030046463,
+          "membrane_potential": 0.7752994894981384,
+          "concentration_change": 1.0963833928108215,
+          "absolute_change": 1.0963833928108215,
+          "prediction_error": 0.7306903004646301
+        },
+        {
+          "k": 41,
+          "predicted_concentration": 15.903082191944122,
+          "membrane_potential": 0.7843727469444275,
+          "concentration_change": 1.2687752842903137,
+          "absolute_change": 1.2687752842903137,
+          "prediction_error": 0.9030821919441223
+        },
+        {
+          "k": 46,
+          "predicted_concentration": 15.925247251987457,
+          "membrane_potential": 0.7855393290519714,
+          "concentration_change": 1.2909403443336487,
+          "absolute_change": 1.2909403443336487,
+          "prediction_error": 0.9252472519874573
+        }
+      ]
+    },
+    "random_k_deletions": {
+      "results": [
+        {
+          "k": 1,
+          "predicted_concentration": 14.774852097034454,
+          "membrane_potential": 0.7249922156333923,
+          "concentration_change": 0.14054518938064575,
+          "absolute_change": 0.14054518938064575,
+          "prediction_error": 0.22514790296554565
+        },
+        {
+          "k": 6,
+          "predicted_concentration": 15.11141061782837,
+          "membrane_potential": 0.7427058219909668,
+          "concentration_change": 0.47710371017456055,
+          "absolute_change": 0.47710371017456055,
+          "prediction_error": 0.11141061782836914
+        },
+        {
+          "k": 11,
+          "predicted_concentration": 15.372132062911987,
+          "membrane_potential": 0.7564280033111572,
+          "concentration_change": 0.7378251552581787,
+          "absolute_change": 0.7378251552581787,
+          "prediction_error": 0.3721320629119873
+        },
+        {
+          "k": 16,
+          "predicted_concentration": 15.714700698852539,
+          "membrane_potential": 0.7744579315185547,
+          "concentration_change": 1.0803937911987305,
+          "absolute_change": 1.0803937911987305,
+          "prediction_error": 0.7147006988525391
+        },
+        {
+          "k": 21,
+          "predicted_concentration": 15.94037276506424,
+          "membrane_potential": 0.7863354086875916,
+          "concentration_change": 1.306065857410431,
+          "absolute_change": 1.306065857410431,
+          "prediction_error": 0.9403727650642395
+        },
+        {
+          "k": 26,
+          "predicted_concentration": 16.0251225233078,
+          "membrane_potential": 0.7907959222793579,
+          "concentration_change": 1.3908156156539917,
+          "absolute_change": 1.3908156156539917,
+          "prediction_error": 1.0251225233078003
+        },
+        {
+          "k": 31,
+          "predicted_concentration": 15.941961646080017,
+          "membrane_potential": 0.7864190340042114,
+          "concentration_change": 1.3076547384262085,
+          "absolute_change": 1.3076547384262085,
+          "prediction_error": 0.9419616460800171
+        },
+        {
+          "k": 36,
+          "predicted_concentration": 16.167293965816498,
+          "membrane_potential": 0.7982786297798157,
+          "concentration_change": 1.5329870581626892,
+          "absolute_change": 1.5329870581626892,
+          "prediction_error": 1.1672939658164978
+        },
+        {
+          "k": 41,
+          "predicted_concentration": 16.33968472480774,
+          "membrane_potential": 0.80735182762146,
+          "concentration_change": 1.7053778171539307,
+          "absolute_change": 1.7053778171539307,
+          "prediction_error": 1.3396847248077393
+        },
+        {
+          "k": 46,
+          "predicted_concentration": 16.283104479312897,
+          "membrane_potential": 0.8043739199638367,
+          "concentration_change": 1.6487975716590881,
+          "absolute_change": 1.6487975716590881,
+          "prediction_error": 1.2831044793128967
+        }
+      ]
+    },
+    "summary": {
+      "top_k_average_effect": 0.7864354014396667,
+      "top_k_max_effect": 1.2909403443336487,
+      "random_k_average_effect": 1.1327566504478455,
+      "random_k_max_effect": 1.7053778171539307,
+      "top_k_more_effective": false
+    }
+  },
+  "regression_metrics": {
+    "mse": 7.102783035831646,
+    "rmse": 2.66510469509767,
+    "mae": 1.9796882468896608,
+    "r2_score": 0.8639892610159897,
+    "num_samples": 6
+  }
+}

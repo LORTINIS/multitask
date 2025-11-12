@@ -1,16 +1,6 @@
 """
-Improved Multitask SNN Training: Wine Classification + Ethanol Concentration Regression.
-Training script for TIME SERIES DATA with IMPROVED ARCHITECTURE and ADAPTIVE LOSS BALANCING.
-
-Key Improvements:
-1. Adaptive loss scaling to balance classification and regression tasks
-2. Combined gradient updates (no alternating batches)
-3. Gradient clipping for training stability
-4. Larger shared layer capacity (64→32 neurons)
-5. Learning rate scheduling
-6. Comprehensive monitoring and diagnostics
-
-Architecture: Shared (64→32) + Class (32→16→3) + Reg (32→16→1)
+Multitask Time Series SNN Training: Wine Classification + Ethanol Concentration Regression
+FIXED VERSION - Proper train-test split order to prevent data leakage
 """
 
 import os
@@ -25,16 +15,11 @@ from sklearn.metrics import (
     accuracy_score, precision_recall_fscore_support, confusion_matrix,
     mean_squared_error, mean_absolute_error, r2_score
 )
+from sklearn.preprocessing import MinMaxScaler, LabelEncoder
+from sklearn.model_selection import train_test_split
 import seaborn as sns
 from datetime import datetime
-
-# Import utilities
-from utils.data_loader import load_wine_dataset, load_ethanol_dataset
-from utils.preprocessing_time_series import (
-    preprocess_time_series_features,
-    create_train_test_split_sequences
-)
-from utils.spike_encoding_time_series import encode_time_series_datasets
+import inspect
 
 # Import architecture utilities
 from architectures import (
@@ -84,31 +69,352 @@ class AdaptiveLossScaler:
         scaled_reg = reg_loss * self.reg_loss_scale * reg_weight
         return scaled_class, scaled_reg
 
+# ============================================================================
+# CONFIGURATION
+# ============================================================================
+
+# Time series configuration
+SEQUENCE_LENGTH = 750
+DOWNSAMPLE_FACTOR = 3
+STABILIZATION_PERIOD = 500
+ENCODING_TYPE = 'direct'  # Options: 'direct', 'delta', 'rate'
+
+# Only MQ sensors (excluding temperature and humidity)
+SENSOR_COLS = [
+    'MQ-3_R1 (kOhm)', 'MQ-4_R1 (kOhm)', 'MQ-6_R1 (kOhm)',
+    'MQ-3_R2 (kOhm)', 'MQ-4_R2 (kOhm)', 'MQ-6_R2 (kOhm)'
+]
+
+# Model hyperparameters - New Architecture
+ENCODER_HIDDEN = 8    # Common encoder for both tasks
+SHARED_HIDDEN = 24    # Shared layer (8→24)
+CLASS_HIDDEN = 8      # Classification hidden layer
+REG_HIDDEN = 14       # Regression hidden layer
+NUM_CLASSES = 3
+BETA = 0.9
+
+# Training hyperparameters
+LEARNING_RATE = 0.001
+NUM_EPOCHS = 100
+BATCH_SIZE = 64
+REG_WEIGHT = 0.5
+
+# Device
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+# ============================================================================
+# DATA LOADING FUNCTIONS
+# ============================================================================
+
+def load_wine_timeseries_dataset(base_path):
+    """Load wine dataset preserving temporal structure."""
+    all_data = []
+    
+    ts_columns = [
+        'Rel_Humidity (%)', 'Temperature (C)',
+        'MQ-3_R1 (kOhm)', 'MQ-4_R1 (kOhm)', 'MQ-6_R1 (kOhm)',
+        'MQ-3_R2 (kOhm)', 'MQ-4_R2 (kOhm)', 'MQ-6_R2 (kOhm)'
+    ]
+    
+    wine_categories = {
+        'HQ_Wines': 'HQ',
+        'LQ_Wines': 'LQ',
+        'AQ_Wines': 'AQ'
+    }
+    
+    print(f"Loading wine data from: {base_path}")
+    
+    for category, label in wine_categories.items():
+        category_path = os.path.join(base_path, category)
+        if not os.path.exists(category_path):
+            continue
+            
+        print(f"Processing category: {category}...")
+        
+        files = os.listdir(category_path)
+        for file_name in files:
+            if file_name.endswith('.txt'):
+                file_path = os.path.join(category_path, file_name)
+                
+                try:
+                    df_file = pd.read_csv(file_path, sep=r'\s+', header=None, 
+                                        names=ts_columns)
+                    df_file['Filename'] = file_name
+                    df_file['Time_Point'] = range(len(df_file))
+                    df_file['Category'] = category
+                    df_file['Label'] = label
+                    
+                    rep_start_index = file_name.rfind('R')
+                    df_file['Repetition'] = (file_name[rep_start_index:rep_start_index + 3] 
+                                            if rep_start_index != -1 else 'Unknown')
+                    
+                    all_data.append(df_file)
+                    
+                except Exception as e:
+                    print(f"Error processing {file_name}: {e}")
+                    continue
+    
+    if not all_data:
+        return pd.DataFrame()
+    
+    final_df = pd.concat(all_data, ignore_index=True)
+    print(f"\nTotal wine rows loaded: {len(final_df)}")
+    print(f"Unique wine files: {final_df['Filename'].nunique()}")
+    return final_df
+
+
+def load_ethanol_timeseries_dataset(base_path):
+    """Load ethanol dataset preserving temporal structure."""
+    all_data = []
+    
+    ts_columns = [
+        'Rel_Humidity (%)', 'Temperature (C)',
+        'MQ-3_R1 (kOhm)', 'MQ-4_R1 (kOhm)', 'MQ-6_R1 (kOhm)',
+        'MQ-3_R2 (kOhm)', 'MQ-4_R2 (kOhm)', 'MQ-6_R2 (kOhm)'
+    ]
+    
+    ethanol_concentration_map = {
+        'C1': 1.0,
+        'C2': 2.5,
+        'C3': 5.0,
+        'C4': 10.0,
+        'C5': 15.0,
+        'C6': 20.0
+    }
+    
+    print(f"Loading ethanol data from: {base_path}")
+    
+    ethanol_path = os.path.join(base_path, 'Ethanol')
+    
+    if not os.path.exists(ethanol_path):
+        print(f"Warning: Ethanol folder not found at {ethanol_path}")
+        return pd.DataFrame()
+    
+    print(f"Processing folder: Ethanol...")
+    
+    files = os.listdir(ethanol_path)
+    for file_name in files:
+        if file_name.endswith('.txt'):
+            file_path = os.path.join(ethanol_path, file_name)
+            
+            try:
+                df_file = pd.read_csv(file_path, sep=r'\s+', header=None, 
+                                    names=ts_columns)
+                df_file['Filename'] = file_name
+                df_file['Time_Point'] = range(len(df_file))
+                
+                conc_code = file_name[3:5]
+                df_file['Concentration_Value'] = ethanol_concentration_map.get(conc_code, np.nan)
+                df_file['Concentration_Label'] = f"{ethanol_concentration_map.get(conc_code, 'Unknown')}%"
+                
+                rep_start_index = file_name.rfind('R')
+                df_file['Repetition'] = (file_name[rep_start_index:rep_start_index + 3] 
+                                        if rep_start_index != -1 else 'Unknown')
+                
+                all_data.append(df_file)
+                
+            except Exception as e:
+                print(f"Error processing {file_name}: {e}")
+                continue
+    
+    if not all_data:
+        return pd.DataFrame()
+    
+    final_df = pd.concat(all_data, ignore_index=True)
+    print(f"\nTotal ethanol rows loaded: {len(final_df)}")
+    print(f"Unique ethanol files: {final_df['Filename'].nunique()}")
+    return final_df
+
+
+# ============================================================================
+# TIME SERIES PREPROCESSING
+# ============================================================================
+
+def remove_stabilization_period(df, period=500):
+    """Remove initial stabilization period from each file."""
+    processed_files = []
+    
+    for filename in df['Filename'].unique():
+        file_data = df[df['Filename'] == filename].copy()
+        
+        if len(file_data) > period:
+            file_data = file_data.iloc[period:].reset_index(drop=True)
+            processed_files.append(file_data)
+    
+    return pd.concat(processed_files, ignore_index=True) if processed_files else pd.DataFrame()
+
+
+def prepare_time_series_sequences(df, feature_cols, sequence_length, downsample_factor):
+    """Prepare time series sequences from DataFrame."""
+    sequences = []
+    targets = []
+    metadata = []
+    
+    for filename in df['Filename'].unique():
+        file_data = df[df['Filename'] == filename]
+        
+        sequence = file_data[feature_cols].values
+        
+        if downsample_factor > 1:
+            sequence = sequence[::downsample_factor]
+        
+        if len(sequence) < sequence_length:
+            padding = np.repeat(sequence[-1:], sequence_length - len(sequence), axis=0)
+            sequence = np.vstack([sequence, padding])
+        elif len(sequence) > sequence_length:
+            sequence = sequence[:sequence_length]
+        
+        sequences.append(sequence)
+        
+        if 'Label' in file_data.columns:
+            targets.append(file_data['Label'].iloc[0])
+        elif 'Concentration_Value' in file_data.columns:
+            targets.append(file_data['Concentration_Value'].iloc[0])
+        
+        metadata.append({
+            'Filename': filename,
+            'Repetition': file_data['Repetition'].iloc[0]
+        })
+    
+    return sequences, targets, metadata
+
+
+def clean_sequence(seq):
+    """Clean a single sequence of NaN and Inf values."""
+    seq = seq.copy()
+    for col_idx in range(seq.shape[1]):
+        col_data = seq[:, col_idx]
+        if np.isnan(col_data).any() or np.isinf(col_data).any():
+            col_mean = np.nanmean(col_data[np.isfinite(col_data)])
+            if np.isnan(col_mean):
+                col_mean = 0.0
+            seq[:, col_idx] = np.where(
+                np.isnan(col_data) | np.isinf(col_data), 
+                col_mean, 
+                col_data
+            )
+    return seq
+
+
+def fit_scaler_and_normalize(sequences_train):
+    """Fit scaler on training data and normalize."""
+    sequences_clean = [clean_sequence(seq) for seq in sequences_train]
+    
+    all_data = np.vstack(sequences_clean)
+    scaler = MinMaxScaler(feature_range=(0, 1))
+    scaler.fit(all_data)
+    
+    normalized_sequences = [scaler.transform(seq) for seq in sequences_clean]
+    
+    return normalized_sequences, scaler
+
+
+def transform_with_scaler(sequences, scaler):
+    """Transform sequences using pre-fitted scaler."""
+    sequences_clean = [clean_sequence(seq) for seq in sequences]
+    normalized_sequences = [scaler.transform(seq) for seq in sequences_clean]
+    return normalized_sequences
+
+
+# ============================================================================
+# SPIKE ENCODING FUNCTIONS
+# ============================================================================
+
+def encode_time_series_direct(sequences):
+    """Direct threshold-based spike encoding."""
+    sequences_tensor = torch.FloatTensor(np.array(sequences))
+    
+    # Use last timestep for threshold (better temporal encoding)
+    spike_data = (sequences_tensor > 0.5).float()
+    
+    spike_data = spike_data.permute(1, 0, 2)
+    
+    return spike_data
+
+
+def encode_time_series_delta(sequences, threshold=0.05):
+    """Delta encoding - spikes represent significant temporal changes."""
+    sequences_tensor = torch.FloatTensor(np.array(sequences))
+    
+    deltas = sequences_tensor[:, 1:, :] - sequences_tensor[:, :-1, :]
+    
+    min_val, max_val = deltas.min(), deltas.max()
+    deltas = (deltas - min_val) / (max_val - min_val + 1e-8)
+    
+    spike_data = (torch.abs(deltas) > threshold).float()
+    
+    spike_data = spike_data.permute(1, 0, 2)
+    
+    return spike_data
+
+
+def encode_time_series_rate(sequences, num_steps=100):
+    """Rate encoding - spike frequency represents value."""
+    sequences_tensor = torch.FloatTensor(np.array(sequences))
+    
+    min_val, max_val = sequences_tensor.min(), sequences_tensor.max()
+    if max_val > 1.0 or min_val < 0.0:
+        sequences_tensor = (sequences_tensor - min_val) / (max_val - min_val + 1e-8)
+    
+    avg_input = sequences_tensor.mean(dim=1)
+    
+    rand = torch.rand((num_steps, *avg_input.shape))
+    spike_data = (rand < avg_input.unsqueeze(0)).float()
+    
+    return spike_data
+
+
+# ============================================================================
+# TRAINING FUNCTIONS
+# ============================================================================
 
 def create_dataloaders(X_train, y_train, X_test, y_test, batch_size=32):
-    """Create PyTorch DataLoaders for training and testing."""
+    """Create PyTorch DataLoaders."""
+    if not torch.is_tensor(X_train):
+        X_train = torch.tensor(X_train, dtype=torch.float32)
+    if not torch.is_tensor(X_test):
+        X_test = torch.tensor(X_test, dtype=torch.float32)
+
+    def _to_label_tensor(y):
+        if not torch.is_tensor(y):
+            y = np.array(y)
+            if np.issubdtype(y.dtype, np.integer):
+                return torch.tensor(y, dtype=torch.long)
+            else:
+                return torch.tensor(y, dtype=torch.float32)
+        else:
+            if y.dtype in (torch.int32, torch.int64):
+                return y.long()
+            elif y.dtype in (torch.float32, torch.float64):
+                return y.float()
+            else:
+                return y
+
+    y_train = _to_label_tensor(y_train)
+    y_test = _to_label_tensor(y_test)
+
     train_dataset = TensorDataset(X_train, y_train)
     test_dataset = TensorDataset(X_test, y_test)
-    
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-    
+
+    num_workers = min(4, (os.cpu_count() or 1))
+    pin_memory = True if device.type == 'cuda' else False
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=batch_size, shuffle=True,
+        num_workers=num_workers, pin_memory=pin_memory
+    )
+    test_loader = DataLoader(
+        test_dataset, batch_size=batch_size, shuffle=False,
+        num_workers=max(1, num_workers // 2), pin_memory=pin_memory
+    )
+
     return train_loader, test_loader
 
 
-def train_multitask_epoch_improved(model, wine_loader, ethanol_loader, device,
-                                   classification_criterion, regression_criterion,
-                                   optimizer, loss_scaler, reg_weight=0.5,
-                                   max_grad_norm=1.0, warmup=False):
-    """
-    Improved training function with proper loss balancing and gradient combining.
-    
-    Key improvements:
-    - Process both tasks in the same batch when possible
-    - Adaptive loss scaling
-    - Gradient clipping
-    - Better logging
-    """
+def train_multitask_epoch(model, wine_loader, ethanol_loader, device,
+                          classification_criterion, regression_criterion,
+                          optimizer, reg_weight=0.5):
+    """Train for one epoch using both tasks."""
     model.train()
     total_loss = 0
     total_class_loss = 0
@@ -117,25 +423,70 @@ def train_multitask_epoch_improved(model, wine_loader, ethanol_loader, device,
     total_scaled_reg_loss = 0
     num_batches = 0
     
-    # Create iterators
     wine_iter = iter(wine_loader)
     ethanol_iter = iter(ethanol_loader)
     
-    # Process both datasets in parallel (not alternating!)
-    max_batches = min(len(wine_loader), len(ethanol_loader))
+    wine_exhausted = False
+    ethanol_exhausted = False
     
     for _ in range(max_batches):
         optimizer.zero_grad()
         batch_class_loss = 0
         batch_reg_loss = 0
+        tasks_processed = 0
         
-        # ====================================================================
-        # WINE CLASSIFICATION TASK
-        # ====================================================================
-        try:
-            wine_spikes, wine_labels = next(wine_iter)
-            wine_spikes = wine_spikes.to(device)
-            wine_labels = wine_labels.to(device)
+        # Process wine batch (classification)
+        if not wine_exhausted:
+            try:
+                wine_spikes, wine_labels = next(wine_iter)
+                wine_spikes = wine_spikes.to(device)
+                wine_labels = wine_labels.to(device)
+                
+                wine_spikes = wine_spikes.permute(1, 0, 2)
+                
+                output = model(wine_spikes)
+                
+                # FIXED: Use last timestep or sum instead of mean
+                class_mem_rec = output['classification']['mem_rec']
+                class_output = class_mem_rec[-1]  # Last timestep
+                
+                class_loss = classification_criterion(class_output, wine_labels.long())
+                
+                batch_class_loss = class_loss.item()
+                batch_loss += (1 - reg_weight) * class_loss
+                tasks_processed += 1
+                
+            except StopIteration:
+                wine_exhausted = True
+        
+        # Process ethanol batch (regression)
+        if not ethanol_exhausted:
+            try:
+                ethanol_spikes, ethanol_conc = next(ethanol_iter)
+                ethanol_spikes = ethanol_spikes.to(device)
+                ethanol_conc = ethanol_conc.to(device)
+                
+                ethanol_spikes = ethanol_spikes.permute(1, 0, 2)
+                
+                output = model(ethanol_spikes)
+                
+                # FIXED: Use last timestep or sum instead of mean
+                reg_mem_rec = output['regression']['mem_rec']
+                predicted_conc = reg_mem_rec[-1].squeeze()  # Last timestep
+                
+                reg_loss = regression_criterion(predicted_conc, ethanol_conc)
+                
+                batch_reg_loss = reg_loss.item()
+                batch_loss += reg_weight * reg_loss
+                tasks_processed += 1
+                
+            except StopIteration:
+                ethanol_exhausted = True
+        
+        if tasks_processed > 0:
+            optimizer.zero_grad()
+            batch_loss.backward()
+            optimizer.step()
             
             # Permute to [time_steps, batch, features]
             wine_spikes = wine_spikes.permute(1, 0, 2)
@@ -262,7 +613,8 @@ def evaluate_classification(model, data_loader, device):
             output = model(spikes)
             mem_rec = output['classification']['mem_rec']
             
-            _, predicted = torch.max(mem_rec.sum(0), 1)
+            # FIXED: Use last timestep
+            _, predicted = torch.max(mem_rec[-1], 1)
             
             all_preds.extend(predicted.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
@@ -302,7 +654,8 @@ def evaluate_regression(model, data_loader, device):
             output = model(spikes)
             mem_rec = output['regression']['mem_rec']
             
-            predicted = mem_rec.sum(0).squeeze()
+            # FIXED: Use last timestep
+            predicted = mem_rec[-1].squeeze()
             
             all_preds.extend(predicted.cpu().numpy())
             all_targets.extend(targets.cpu().numpy())
@@ -325,84 +678,59 @@ def evaluate_regression(model, data_loader, device):
     }
 
 
-def plot_training_history_improved(history):
-    """Plot comprehensive training history with loss scaling information."""
-    fig, axes = plt.subplots(2, 3, figsize=(18, 10))
+# ============================================================================
+# VISUALIZATION FUNCTIONS
+# ============================================================================
+
+def plot_training_history(history):
+    """Plot training history with R² score."""
+    fig, axes = plt.subplots(2, 2, figsize=(16, 10))
     
     # Total loss
     axes[0, 0].plot(history['total_loss'], label='Total Loss', linewidth=2, color='purple')
-    axes[0, 0].set_xlabel('Epoch', fontsize=11)
-    axes[0, 0].set_ylabel('Loss', fontsize=11)
-    axes[0, 0].set_title('Total Combined Loss', fontsize=12, fontweight='bold')
+    axes[0, 0].set_xlabel('Epoch', fontsize=12)
+    axes[0, 0].set_ylabel('Loss', fontsize=12)
+    axes[0, 0].set_title('Total Training Loss', fontsize=14, fontweight='bold')
     axes[0, 0].legend()
     axes[0, 0].grid(True, alpha=0.3)
     
-    # Raw losses
-    axes[0, 1].plot(history['class_loss'], label='Class Loss', color='red', linewidth=2)
-    axes[0, 1].plot(history['reg_loss'], label='Reg Loss', color='teal', linewidth=2)
-    axes[0, 1].set_xlabel('Epoch', fontsize=11)
-    axes[0, 1].set_ylabel('Loss', fontsize=11)
-    axes[0, 1].set_title('Raw Task Losses', fontsize=12, fontweight='bold')
+    # Classification loss
+    axes[0, 1].plot(history['class_loss'], label='Classification Loss',
+                    color='red', linewidth=2)
+    axes[0, 1].set_xlabel('Epoch', fontsize=12)
+    axes[0, 1].set_ylabel('Loss', fontsize=12)
+    axes[0, 1].set_title('Classification Loss', fontsize=14, fontweight='bold')
     axes[0, 1].legend()
     axes[0, 1].grid(True, alpha=0.3)
     
-    # Scaled losses
-    axes[0, 2].plot(history['scaled_class_loss'], label='Scaled Class', color='darkred', linewidth=2)
-    axes[0, 2].plot(history['scaled_reg_loss'], label='Scaled Reg', color='darkcyan', linewidth=2)
-    axes[0, 2].set_xlabel('Epoch', fontsize=11)
-    axes[0, 2].set_ylabel('Loss', fontsize=11)
-    axes[0, 2].set_title('Scaled Task Losses (After Balancing)', fontsize=12, fontweight='bold')
-    axes[0, 2].legend()
-    axes[0, 2].grid(True, alpha=0.3)
-    
-    # Loss scales
-    axes[1, 0].plot(history['class_scale'], label='Class Scale', color='red', linewidth=2)
-    axes[1, 0].plot(history['reg_scale'], label='Reg Scale', color='teal', linewidth=2)
-    axes[1, 0].set_xlabel('Epoch', fontsize=11)
-    axes[1, 0].set_ylabel('Scale Factor', fontsize=11)
-    axes[1, 0].set_title('Adaptive Loss Scales', fontsize=12, fontweight='bold')
+    # Regression loss
+    axes[1, 0].plot(history['reg_loss'], label='Regression Loss',
+                    color='teal', linewidth=2)
+    axes[1, 0].set_xlabel('Epoch', fontsize=12)
+    axes[1, 0].set_ylabel('Loss', fontsize=12)
+    axes[1, 0].set_title('Regression Loss', fontsize=14, fontweight='bold')
     axes[1, 0].legend()
     axes[1, 0].grid(True, alpha=0.3)
     
-    # Loss ratio
-    if len(history['class_loss']) > 0 and len(history['reg_loss']) > 0:
-        loss_ratio = [c / (r + 1e-8) for c, r in zip(history['class_loss'], history['reg_loss'])]
-        axes[1, 1].plot(loss_ratio, label='Class/Reg Ratio', color='orange', linewidth=2)
-        axes[1, 1].axhline(y=1.0, color='gray', linestyle='--', label='Equal (1:1)')
-        axes[1, 1].set_xlabel('Epoch', fontsize=11)
-        axes[1, 1].set_ylabel('Ratio', fontsize=11)
-        axes[1, 1].set_title('Loss Magnitude Ratio', fontsize=12, fontweight='bold')
+    # R² score
+    if 'r2_score' in history:
+        axes[1, 1].plot(history['r2_score'], label='R² Score',
+                        color='green', linewidth=2)
+        axes[1, 1].axhline(y=0, color='gray', linestyle='--', alpha=0.5)
+        axes[1, 1].set_xlabel('Epoch', fontsize=12)
+        axes[1, 1].set_ylabel('R² Score', fontsize=12)
+        axes[1, 1].set_title('Regression R² Score', fontsize=14, fontweight='bold')
         axes[1, 1].legend()
         axes[1, 1].grid(True, alpha=0.3)
-    
-    # Training dynamics
-    if 'eval_accuracy' in history and 'eval_r2' in history and len(history['eval_accuracy']) > 0:
-        ax2 = axes[1, 2].twinx()
-        eval_epochs = [i * 5 for i in range(len(history['eval_accuracy']))]  # Assuming EVAL_EVERY=5
-        axes[1, 2].plot(eval_epochs, history['eval_accuracy'], label='Accuracy', color='blue', linewidth=2, marker='o')
-        ax2.plot(eval_epochs, history['eval_r2'], label='R²', color='green', linewidth=2, marker='s')
-        axes[1, 2].set_xlabel('Epoch', fontsize=11)
-        axes[1, 2].set_ylabel('Accuracy', fontsize=11, color='blue')
-        ax2.set_ylabel('R²', fontsize=11, color='green')
-        axes[1, 2].set_title('Validation Metrics', fontsize=12, fontweight='bold')
-        axes[1, 2].tick_params(axis='y', labelcolor='blue')
-        ax2.tick_params(axis='y', labelcolor='green')
-        axes[1, 2].grid(True, alpha=0.3)
-        
-        # Combine legends
-        lines1, labels1 = axes[1, 2].get_legend_handles_labels()
-        lines2, labels2 = ax2.get_legend_handles_labels()
-        axes[1, 2].legend(lines1 + lines2, labels1 + labels2, loc='best')
     
     plt.tight_layout()
     plt.show()
 
 
-def plot_classification_results(results, class_names=['HQ', 'LQ', 'AQ']):
-    """Plot classification performance metrics and confusion matrix."""
+def plot_classification_results(results, class_names):
+    """Plot classification metrics and confusion matrix."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     
-    # Metrics bar plot
     metrics = {
         'Accuracy': results['accuracy'],
         'Precision': results['precision'],
@@ -410,65 +738,70 @@ def plot_classification_results(results, class_names=['HQ', 'LQ', 'AQ']):
         'F1-Score': results['f1']
     }
     
-    axes[0].bar(metrics.keys(), metrics.values(), color=['blue', 'green', 'orange', 'red'])
+    axes[0].bar(metrics.keys(), metrics.values(), 
+               color=['blue', 'green', 'orange', 'red'])
     axes[0].set_ylim([0, 1])
     axes[0].set_ylabel('Score', fontsize=12)
-    axes[0].set_title('Classification Metrics (Wine Quality)', fontsize=14, fontweight='bold')
+    axes[0].set_title('Classification Metrics', fontsize=14, fontweight='bold')
     axes[0].grid(True, axis='y', alpha=0.3)
     
-    # Add value labels on bars
     for i, (metric, value) in enumerate(metrics.items()):
         axes[0].text(i, value + 0.02, f'{value:.3f}', ha='center', fontsize=10)
     
-    # Confusion matrix
     cm = results['confusion_matrix']
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', ax=axes[1],
                 xticklabels=class_names, yticklabels=class_names)
     axes[1].set_xlabel('Predicted', fontsize=12)
     axes[1].set_ylabel('Actual', fontsize=12)
-    axes[1].set_title('Confusion Matrix (Wine Quality)', fontsize=14, fontweight='bold')
+    axes[1].set_title('Confusion Matrix', fontsize=14, fontweight='bold')
     
     plt.tight_layout()
     plt.show()
 
 
-def plot_regression_results(reg_results):
-    """Plot regression performance metrics and predictions vs actual."""
+def plot_regression_results(results, scaler_y=None):
+    """Plot regression metrics and predictions."""
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
     
-    # Metrics bar plot
-    metrics = {
-        'RMSE': reg_results['rmse'],
-        'MAE': reg_results['mae'],
-        'R²': reg_results['r2']
-    }
+    if scaler_y is not None:
+        predictions = scaler_y.inverse_transform(
+            results['predictions'].reshape(-1, 1)).flatten()
+        targets = scaler_y.inverse_transform(
+            results['targets'].reshape(-1, 1)).flatten()
+        
+        rmse = np.sqrt(mean_squared_error(targets, predictions))
+        mae = mean_absolute_error(targets, predictions)
+        r2 = r2_score(targets, predictions)
+    else:
+        predictions = results['predictions']
+        targets = results['targets']
+        rmse = results['rmse']
+        mae = results['mae']
+        r2 = results['r2']
+    
+    metrics = {'RMSE': rmse, 'MAE': mae, 'R²': r2}
     
     colors = ['red', 'orange', 'green']
     bars = axes[0].bar(metrics.keys(), metrics.values(), color=colors)
     axes[0].set_ylabel('Score', fontsize=12)
-    axes[0].set_title('Regression Metrics (Ethanol Concentration)', fontsize=14, fontweight='bold')
+    axes[0].set_title('Regression Metrics', fontsize=14, fontweight='bold')
     axes[0].grid(True, axis='y', alpha=0.3)
     
-    # Add value labels on bars
     for bar, (metric, value) in zip(bars, metrics.items()):
         height = bar.get_height()
         axes[0].text(bar.get_x() + bar.get_width()/2., height + 0.01,
                      f'{value:.3f}', ha='center', fontsize=10)
     
-    # Predictions vs Actual
-    predictions = reg_results['predictions']
-    targets = reg_results['targets']
-    
     axes[1].scatter(targets, predictions, alpha=0.6, s=50)
     
-    # Plot diagonal line
     min_val = min(targets.min(), predictions.min())
     max_val = max(targets.max(), predictions.max())
-    axes[1].plot([min_val, max_val], [min_val, max_val], 'r--', linewidth=2, label='Perfect Prediction')
+    axes[1].plot([min_val, max_val], [min_val, max_val], 
+                'r--', linewidth=2, label='Perfect Prediction')
     
-    axes[1].set_xlabel('Actual Concentration (normalized)', fontsize=12)
-    axes[1].set_ylabel('Predicted Concentration (normalized)', fontsize=12)
-    axes[1].set_title('Predictions vs Actual (Ethanol)', fontsize=14, fontweight='bold')
+    axes[1].set_xlabel('Actual Concentration (%)', fontsize=12)
+    axes[1].set_ylabel('Predicted Concentration (%)', fontsize=12)
+    axes[1].set_title('Predictions vs Actual', fontsize=14, fontweight='bold')
     axes[1].legend()
     axes[1].grid(True, alpha=0.3)
     
@@ -476,198 +809,180 @@ def plot_regression_results(reg_results):
     plt.show()
 
 
-def plot_shared_layer_activity(model, wine_sample, ethanol_sample, device):
-    """Visualize shared layer activity for both tasks."""
-    model.eval()
-    
-    with torch.no_grad():
-        wine_output = model(wine_sample.to(device))
-        ethanol_output = model(ethanol_sample.to(device))
-    
-    shared_data = wine_output['shared']
-    
-    if 'spk_rec1' in shared_data and 'spk_rec2' in shared_data:
-        # Two shared layers architecture
-        wine_shared1 = shared_data['spk_rec1'].cpu().numpy()
-        wine_shared2 = shared_data['spk_rec2'].cpu().numpy()
-        ethanol_shared1 = ethanol_output['shared']['spk_rec1'].cpu().numpy()
-        ethanol_shared2 = ethanol_output['shared']['spk_rec2'].cpu().numpy()
-        
-        # Get task-specific hidden layers
-        wine_class_hidden = wine_output['classification']['spk_rec'].cpu().numpy()
-        wine_reg_hidden = wine_output['regression']['spk_rec'].cpu().numpy()
-        ethanol_class_hidden = ethanol_output['classification']['spk_rec'].cpu().numpy()
-        ethanol_reg_hidden = ethanol_output['regression']['spk_rec'].cpu().numpy()
-        
-        fig, axes = plt.subplots(2, 4, figsize=(20, 10))
-        
-        # Wine - Shared Layer 1
-        axes[0, 0].imshow(wine_shared1[:, 0, :].T, aspect='auto', cmap='binary')
-        axes[0, 0].set_xlabel('Time Step', fontsize=10)
-        axes[0, 0].set_ylabel('Neuron Index', fontsize=10)
-        axes[0, 0].set_title('Wine: Shared Layer 1', fontsize=12, fontweight='bold')
-        
-        # Wine - Shared Layer 2
-        axes[0, 1].imshow(wine_shared2[:, 0, :].T, aspect='auto', cmap='binary')
-        axes[0, 1].set_xlabel('Time Step', fontsize=10)
-        axes[0, 1].set_ylabel('Neuron Index', fontsize=10)
-        axes[0, 1].set_title('Wine: Shared Layer 2', fontsize=12, fontweight='bold')
-        
-        # Wine - Classification Hidden
-        axes[0, 2].imshow(wine_class_hidden[:, 0, :].T, aspect='auto', cmap='Reds')
-        axes[0, 2].set_xlabel('Time Step', fontsize=10)
-        axes[0, 2].set_ylabel('Neuron Index', fontsize=10)
-        axes[0, 2].set_title('Wine: Classification Hidden', fontsize=12, fontweight='bold')
-        
-        # Wine - Regression Hidden
-        axes[0, 3].imshow(wine_reg_hidden[:, 0, :].T, aspect='auto', cmap='Blues')
-        axes[0, 3].set_xlabel('Time Step', fontsize=10)
-        axes[0, 3].set_ylabel('Neuron Index', fontsize=10)
-        axes[0, 3].set_title('Wine: Regression Hidden', fontsize=12, fontweight='bold')
-        
-        # Ethanol - Shared Layer 1
-        axes[1, 0].imshow(ethanol_shared1[:, 0, :].T, aspect='auto', cmap='binary')
-        axes[1, 0].set_xlabel('Time Step', fontsize=10)
-        axes[1, 0].set_ylabel('Neuron Index', fontsize=10)
-        axes[1, 0].set_title('Ethanol: Shared Layer 1', fontsize=12, fontweight='bold')
-        
-        # Ethanol - Shared Layer 2
-        axes[1, 1].imshow(ethanol_shared2[:, 0, :].T, aspect='auto', cmap='binary')
-        axes[1, 1].set_xlabel('Time Step', fontsize=10)
-        axes[1, 1].set_ylabel('Neuron Index', fontsize=10)
-        axes[1, 1].set_title('Ethanol: Shared Layer 2', fontsize=12, fontweight='bold')
-        
-        # Ethanol - Classification Hidden
-        axes[1, 2].imshow(ethanol_class_hidden[:, 0, :].T, aspect='auto', cmap='Reds')
-        axes[1, 2].set_xlabel('Time Step', fontsize=10)
-        axes[1, 2].set_ylabel('Neuron Index', fontsize=10)
-        axes[1, 2].set_title('Ethanol: Classification Hidden', fontsize=12, fontweight='bold')
-        
-        # Ethanol - Regression Hidden
-        axes[1, 3].imshow(ethanol_reg_hidden[:, 0, :].T, aspect='auto', cmap='Blues')
-        axes[1, 3].set_xlabel('Time Step', fontsize=10)
-        axes[1, 3].set_ylabel('Neuron Index', fontsize=10)
-        axes[1, 3].set_title('Ethanol: Regression Hidden', fontsize=12, fontweight='bold')
-        
-    plt.tight_layout()
-    plt.show()
+# ============================================================================
+# MAIN FUNCTION
+# ============================================================================
 
-
-def main(selected_arch_name='improved_shared_64_32_class_16_reg_16'):
-    """Main training and evaluation pipeline with improved multitask learning."""
+def main(selected_arch_name=None):
+    """Main training pipeline."""
     print("="*80)
-    print("IMPROVED MULTITASK SNN TRAINING")
-    print("WITH ADAPTIVE LOSS BALANCING & GRADIENT CLIPPING")
+    print("MULTITASK TIME SERIES SNN - FIXED VERSION")
+    print("Wine Classification + Ethanol Regression")
     print("="*80)
     
-    # Force use of improved architecture
-    print(f"\n✓ Using architecture: {selected_arch_name}")
+    # Architecture selection
+    if selected_arch_name is None:
+        print_available_architectures()
+        available_archs = get_available_architectures()
+        
+        if not available_archs:
+            print("\nERROR: No architectures found!")
+            sys.exit(1)
+        
+        arch_list = list(available_archs.keys())
+        print("\nSelect an architecture:")
+        for i, arch_name in enumerate(arch_list, 1):
+            print(f"  {i}. {arch_name}")
+        
+        while True:
+            try:
+                choice = input(f"\nEnter choice (1-{len(arch_list)}): ").strip()
+                choice_idx = int(choice) - 1
+                if 0 <= choice_idx < len(arch_list):
+                    selected_arch_name = arch_list[choice_idx]
+                    break
+            except (ValueError, KeyboardInterrupt):
+                print("\nTraining cancelled.")
+                sys.exit(0)
     
-    # Load the architecture
-    try:
-        arch_module = load_architecture(selected_arch_name)
-        MultitaskSNN = arch_module.MultitaskSNN
-    except:
-        print(f"\nERROR: Could not load architecture '{selected_arch_name}'")
-        print("Make sure the improved_multitask_snn.py file is in the architectures folder!")
-        sys.exit(1)
+    print(f"\n✓ Selected architecture: {selected_arch_name}")
     
-    # ========================================================================
-    # CONFIGURATION
-    # ========================================================================
-    base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    wine_data_path = os.path.join(base_dir, "data", "wine")
-    ethanol_data_path = os.path.join(base_dir, "data", "wine")
-    # Save trained models into shared directory 'tr'
-    models_dir = "models"
+    # Load architecture
+    arch_module = load_architecture(selected_arch_name)
+    MultitaskSNN = arch_module.MultitaskSNN
+    
+    # Paths
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    models_dir = os.path.join(base_dir, "model")
     os.makedirs(models_dir, exist_ok=True)
-    
-    print(f"\nData paths:")
-    print(f"  Wine: {wine_data_path}")
-    print(f"  Ethanol: {ethanol_data_path}")
-    
-    # ========================================================================
-    # IMPROVED HYPERPARAMETERS
-    # ========================================================================
-    # Time series config
-    SEQUENCE_LENGTH = 1000  # Longer sequences (from train_two_shared_layers.py)
-    DOWNSAMPLE_FACTOR = 2   # Keep same factor
-    ENCODING_TYPE = 'direct'
-    
-    # Model config - Match successful architecture
-    BETA = 0.95             # Increased memory
-    DROPOUT_RATE = 0.2      # Increased regularization
-    SHARED_SIZE = 32        # First shared layer
-    CLASS_HIDDEN = 16       # Classification branch
-    REG_HIDDEN = 16        # Regression branch
-    
-    # Training config - IMPROVED
-    BASE_LEARNING_RATE = 0.0005  # Start smaller for stability
-    NUM_EPOCHS = 150              # Train longer for convergence
-    BATCH_SIZE = 16               # Smaller batches 
-    REG_WEIGHT = 0.5             # Equal task weighting
-    MAX_GRAD_NORM = 0.5          # Tighter gradient clipping
-    EVAL_EVERY = 5               # Evaluate every N epochs
-    
-    # Model save directory
-    save_dir = os.path.join(os.path.dirname(__file__), 'models')
-    os.makedirs(save_dir, exist_ok=True)
-    
-    # Device
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"\nDevice: {device}")
-    
-    print(f"\nImproved Training Configuration:")
-    print(f"  Base LR: {BASE_LEARNING_RATE}")
-    print(f"  Epochs: {NUM_EPOCHS}")
-    print(f"  Gradient clipping: {MAX_GRAD_NORM}")
-    print(f"  Adaptive loss scaling: Enabled")
-    print(f"  Evaluation every: {EVAL_EVERY} epochs")
-    print(f"  Dropout rate: {DROPOUT_RATE}")
+
+    candidates = [
+        os.path.join(base_dir, "data", "wine"),
+        os.path.join(os.path.dirname(base_dir), "data", "wine"),
+        os.path.join(os.getcwd(), "data", "wine"),
+    ]
+    data_path = next((p for p in candidates if os.path.isdir(p)), None)
+
+    if data_path is None:
+        raise FileNotFoundError(
+            "Could not locate data/wine. Tried:\n  " + "\n  ".join(candidates)
+        )
+
+    print(f"\nUsing device: {device}")
+    print(f"Data path: {data_path}")
     
     # ========================================================================
-    # LOAD AND PREPROCESS DATA
+    # LOAD DATA
     # ========================================================================
     print("\n" + "="*80)
-    print("LOADING AND PREPROCESSING DATA")
+    print("LOADING TIME SERIES DATA")
     print("="*80)
     
-    wine_df = load_wine_dataset(wine_data_path)
-    ethanol_df = load_ethanol_dataset(ethanol_data_path)
+    print("\nLoading wine dataset...")
+    wine_df = load_wine_timeseries_dataset(data_path)
     
-    if wine_df.empty or ethanol_df.empty:
-        print("\nERROR: Data not found!")
+    if wine_df.empty:
+        print(f"\nERROR: No wine data found!")
+        sys.exit(1)
+    
+    print("\nLoading ethanol dataset...")
+    ethanol_df = load_ethanol_timeseries_dataset(data_path)
+    
+    if ethanol_df.empty:
+        print(f"\nERROR: No ethanol data found!")
         sys.exit(1)
     
     # Remove stabilization period
-    print("\nRemoving first 500 time points from wine data...")
-    wine_processed = []
-    for filename in wine_df['Filename'].unique():
-        file_data = wine_df[wine_df['Filename'] == filename].copy()
-        if len(file_data) > 500:
-            file_data = file_data.iloc[500:].reset_index(drop=True)
-            wine_processed.append(file_data)
-    wine_df = pd.concat(wine_processed, ignore_index=True) if wine_processed else pd.DataFrame()
+    print(f"\nRemoving first {STABILIZATION_PERIOD} time points...")
+    wine_df = remove_stabilization_period(wine_df, STABILIZATION_PERIOD)
+    ethanol_df = remove_stabilization_period(ethanol_df, STABILIZATION_PERIOD)
     
-    print("Removing first 500 time points from ethanol data...")
-    ethanol_processed = []
-    for filename in ethanol_df['Filename'].unique():
-        file_data = ethanol_df[ethanol_df['Filename'] == filename].copy()
-        if len(file_data) > 500:
-            file_data = file_data.iloc[500:].reset_index(drop=True)
-            ethanol_processed.append(file_data)
-    ethanol_df = pd.concat(ethanol_processed, ignore_index=True) if ethanol_processed else pd.DataFrame()
+    # ========================================================================
+    # PREPARE TIME SERIES
+    # ========================================================================
+    print("\n" + "="*80)
+    print("PREPARING TIME SERIES SEQUENCES")
+    print("="*80)
     
-    # Preprocess time series
-    preprocessed_data = preprocess_time_series_features(
-        wine_df, ethanol_df,
-        sequence_length=SEQUENCE_LENGTH,
-        downsample_factor=DOWNSAMPLE_FACTOR
+    print(f"\nConfiguration:")
+    print(f"  Sequence length: {SEQUENCE_LENGTH}")
+    print(f"  Downsample factor: {DOWNSAMPLE_FACTOR}")
+    print(f"  Features: {len(SENSOR_COLS)} (MQ sensors only)")
+    print(f"  Encoding: {ENCODING_TYPE}")
+    
+    # Wine sequences
+    print("\nPreparing wine sequences...")
+    wine_sequences, wine_labels, wine_metadata = prepare_time_series_sequences(
+        wine_df, SENSOR_COLS, SEQUENCE_LENGTH, DOWNSAMPLE_FACTOR
     )
     
-    splits = create_train_test_split_sequences(
-        preprocessed_data, test_size=0.2, random_state=42
+    # Ethanol sequences
+    print("Preparing ethanol sequences...")
+    ethanol_sequences, ethanol_conc, ethanol_metadata = prepare_time_series_sequences(
+        ethanol_df, SENSOR_COLS, SEQUENCE_LENGTH, DOWNSAMPLE_FACTOR
     )
+    
+    print(f"\nWine sequences: {len(wine_sequences)}")
+    print(f"Ethanol sequences: {len(ethanol_sequences)}")
+    
+    # Encode labels BEFORE splitting
+    wine_label_encoder = LabelEncoder()
+    wine_labels_encoded = wine_label_encoder.fit_transform(wine_labels)
+    
+    print(f"\nWine classes: {wine_label_encoder.classes_}")
+    print(f"Ethanol concentration range: {min(ethanol_conc):.1f}% - {max(ethanol_conc):.1f}%")
+    
+    # ========================================================================
+    # TRAIN-TEST SPLIT (BEFORE NORMALIZATION!)
+    # ========================================================================
+    print("\n" + "="*80)
+    print("TRAIN-TEST SPLIT")
+    print("="*80)
+    print("\n⚠️  CRITICAL: Splitting BEFORE normalization to prevent data leakage!")
+    
+    # Wine split
+    X_train_wine_raw, X_test_wine_raw, y_train_wine, y_test_wine = train_test_split(
+        wine_sequences, wine_labels_encoded,
+        test_size=0.2, random_state=42, stratify=wine_labels_encoded
+    )
+    
+    # Ethanol split
+    X_train_ethanol_raw, X_test_ethanol_raw, y_train_ethanol_raw, y_test_ethanol_raw = train_test_split(
+        ethanol_sequences, ethanol_conc,
+        test_size=0.2, random_state=42
+    )
+    
+    print(f"\nWine - Train: {len(X_train_wine_raw)}, Test: {len(X_test_wine_raw)}")
+    print(f"Ethanol - Train: {len(X_train_ethanol_raw)}, Test: {len(X_test_ethanol_raw)}")
+    
+    # ========================================================================
+    # NORMALIZATION (FIT ON TRAIN, TRANSFORM TEST)
+    # ========================================================================
+    print("\n" + "="*80)
+    print("NORMALIZATION")
+    print("="*80)
+    print("\n✓ Fitting scalers on TRAINING data only...")
+    
+    # Wine normalization
+    print("\nNormalizing wine sequences...")
+    X_train_wine, wine_scaler = fit_scaler_and_normalize(X_train_wine_raw)
+    X_test_wine = transform_with_scaler(X_test_wine_raw, wine_scaler)
+    
+    # Ethanol normalization
+    print("Normalizing ethanol sequences...")
+    X_train_ethanol, ethanol_scaler = fit_scaler_and_normalize(X_train_ethanol_raw)
+    X_test_ethanol = transform_with_scaler(X_test_ethanol_raw, ethanol_scaler)
+    
+    # Normalize ethanol target values
+    ethanol_scaler_y = MinMaxScaler(feature_range=(0, 1))
+    y_train_ethanol = ethanol_scaler_y.fit_transform(
+        np.array(y_train_ethanol_raw).reshape(-1, 1)
+    ).flatten()
+    y_test_ethanol = ethanol_scaler_y.transform(
+        np.array(y_test_ethanol_raw).reshape(-1, 1)
+    ).flatten()
+    
+    print("✓ Normalization complete (no data leakage)")
     
     # ========================================================================
     # SPIKE ENCODING
@@ -676,107 +991,149 @@ def main(selected_arch_name='improved_shared_64_32_class_16_reg_16'):
     print("SPIKE ENCODING")
     print("="*80)
     
-    spike_encoded_data = encode_time_series_datasets(
-        splits, encoding_type=ENCODING_TYPE, num_steps=None
-    )
+    print(f"\nEncoding type: {ENCODING_TYPE}")
     
-    # Extract data
-    X_train_wine_spikes = spike_encoded_data['wine']['spike_train']
-    X_test_wine_spikes = spike_encoded_data['wine']['spike_test']
-    y_train_wine = spike_encoded_data['wine']['y_train']
-    y_test_wine = spike_encoded_data['wine']['y_test']
-    wine_label_encoder = spike_encoded_data['wine']['label_encoder']
+    if ENCODING_TYPE == 'direct':
+        print("\nEncoding wine training data...")
+        wine_train_spikes = encode_time_series_direct(X_train_wine)
+        print("Encoding wine test data...")
+        wine_test_spikes = encode_time_series_direct(X_test_wine)
+        
+        print("\nEncoding ethanol training data...")
+        ethanol_train_spikes = encode_time_series_direct(X_train_ethanol)
+        print("Encoding ethanol test data...")
+        ethanol_test_spikes = encode_time_series_direct(X_test_ethanol)
+        
+    elif ENCODING_TYPE == 'delta':
+        print("\nEncoding wine training data...")
+        wine_train_spikes = encode_time_series_delta(X_train_wine)
+        print("Encoding wine test data...")
+        wine_test_spikes = encode_time_series_delta(X_test_wine)
+        
+        print("\nEncoding ethanol training data...")
+        ethanol_train_spikes = encode_time_series_delta(X_train_ethanol)
+        print("Encoding ethanol test data...")
+        ethanol_test_spikes = encode_time_series_delta(X_test_ethanol)
+        
+    else:  # rate encoding
+        print("\nEncoding wine training data...")
+        wine_train_spikes = encode_time_series_rate(X_train_wine, num_steps=100)
+        print("Encoding wine test data...")
+        wine_test_spikes = encode_time_series_rate(X_test_wine, num_steps=100)
+        
+        print("\nEncoding ethanol training data...")
+        ethanol_train_spikes = encode_time_series_rate(X_train_ethanol, num_steps=100)
+        print("Encoding ethanol test data...")
+        ethanol_test_spikes = encode_time_series_rate(X_test_ethanol, num_steps=100)
     
-    X_train_ethanol_spikes = spike_encoded_data['ethanol']['spike_train']
-    X_test_ethanol_spikes = spike_encoded_data['ethanol']['spike_test']
-    y_train_ethanol = spike_encoded_data['ethanol']['y_train']
-    y_test_ethanol = spike_encoded_data['ethanol']['y_test']
-    ethanol_scaler_y = spike_encoded_data['ethanol']['scaler_y']
+    print(f"\nWine spikes shape: {wine_train_spikes.shape}")
+    print(f"Ethanol spikes shape: {ethanol_train_spikes.shape}")
     
-    print(f"\n✓ Spike trains created")
-    print(f"  Wine: {X_train_wine_spikes.shape}")
-    print(f"  Ethanol: {X_train_ethanol_spikes.shape}")
+    # Calculate spike statistics
+    wine_spike_rate = wine_train_spikes.sum().item() / wine_train_spikes.numel()
+    ethanol_spike_rate = ethanol_train_spikes.sum().item() / ethanol_train_spikes.numel()
     
-    # Create dataloaders
-    X_train_wine_spikes = X_train_wine_spikes.permute(1, 0, 2)
-    X_test_wine_spikes = X_test_wine_spikes.permute(1, 0, 2)
-    X_train_ethanol_spikes = X_train_ethanol_spikes.permute(1, 0, 2)
-    X_test_ethanol_spikes = X_test_ethanol_spikes.permute(1, 0, 2)
+    print(f"\nWine spike rate: {wine_spike_rate:.4f}")
+    print(f"Ethanol spike rate: {ethanol_spike_rate:.4f}")
+    
+    # ========================================================================
+    # CREATE DATALOADERS
+    # ========================================================================
+    print("\n" + "="*80)
+    print("CREATING DATALOADERS")
+    print("="*80)
+    
+    # Permute to [batch, time, features] for DataLoader
+    wine_train_spikes = wine_train_spikes.permute(1, 0, 2)
+    wine_test_spikes = wine_test_spikes.permute(1, 0, 2)
+    ethanol_train_spikes = ethanol_train_spikes.permute(1, 0, 2)
+    ethanol_test_spikes = ethanol_test_spikes.permute(1, 0, 2)
     
     wine_train_loader, wine_test_loader = create_dataloaders(
-        X_train_wine_spikes, y_train_wine,
-        X_test_wine_spikes, y_test_wine,
+        wine_train_spikes, torch.LongTensor(y_train_wine),
+        wine_test_spikes, torch.LongTensor(y_test_wine),
         batch_size=BATCH_SIZE
     )
     
     ethanol_train_loader, ethanol_test_loader = create_dataloaders(
-        X_train_ethanol_spikes, y_train_ethanol,
-        X_test_ethanol_spikes, y_test_ethanol,
+        ethanol_train_spikes, torch.FloatTensor(y_train_ethanol),
+        ethanol_test_spikes, torch.FloatTensor(y_test_ethanol),
         batch_size=BATCH_SIZE
     )
+    
+    print(f"\nWine train batches: {len(wine_train_loader)}")
+    print(f"Ethanol train batches: {len(ethanol_train_loader)}")
     
     # ========================================================================
     # CREATE MODEL
     # ========================================================================
     print("\n" + "="*80)
-    print("CREATING MODEL")
+    print("CREATING MULTITASK SNN MODEL")
     print("="*80)
     
-    input_size = splits['wine']['X_train'].shape[2]
+    input_size = len(SENSOR_COLS)
     
-    model = MultitaskSNN(
-        input_size=input_size,
-        num_classes=3,
-        beta=BETA,
-        dropout_rate=DROPOUT_RATE
-    ).to(device)
+    # Build kwargs dynamically
+    ctor_sig = inspect.signature(MultitaskSNN.__init__)
+    ctor_params = set(ctor_sig.parameters.keys())
+
+    model_kwargs = {
+        'input_size': input_size,
+        'num_classes': NUM_CLASSES,
+        'beta': BETA
+    }
+
+    # New architecture parameters
+    if 'encoder_hidden' in ctor_params:
+        model_kwargs['encoder_hidden'] = ENCODER_HIDDEN
+    if 'shared_hidden' in ctor_params:
+        model_kwargs['shared_hidden'] = SHARED_HIDDEN
+    if 'shared_hidden1' in ctor_params:
+        model_kwargs['shared_hidden1'] = SHARED_HIDDEN
+    if 'shared_hidden2' in ctor_params:
+        model_kwargs['shared_hidden2'] = max(8, SHARED_HIDDEN // 2)
+
+    if 'classification_hidden' in ctor_params:
+        model_kwargs['classification_hidden'] = CLASS_HIDDEN
+    if 'regression_hidden' in ctor_params:
+        model_kwargs['regression_hidden'] = REG_HIDDEN
+
+    if 'dropout_rate' in ctor_params:
+        model_kwargs['dropout_rate'] = 0.0
+
+    model = MultitaskSNN(**model_kwargs).to(device)
     
     print(model.get_architecture_summary())
     
-    # ========================================================================
-    # TRAINING SETUP - IMPROVED
-    # ========================================================================
-    classification_criterion = nn.CrossEntropyLoss()
-    regression_criterion = nn.MSELoss()
-    optimizer = torch.optim.Adam(model.parameters(), lr=BASE_LEARNING_RATE)
-    
-    # Learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=10, verbose=True
-    )
-    
-    # Adaptive loss scaler
-    loss_scaler = AdaptiveLossScaler(alpha=0.9)
-    
-    print("\n✓ Training setup complete")
-    print(f"  Optimizer: Adam (LR={BASE_LEARNING_RATE})")
-    print(f"  Scheduler: ReduceLROnPlateau")
-    print(f"  Loss scaler: Adaptive EMA (alpha=0.9)")
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"\nTotal parameters: {total_params:,}")
     
     # ========================================================================
-    # TRAINING LOOP
+    # TRAINING WITH R² TRACKING
     # ========================================================================
     print("\n" + "="*80)
-    print("TRAINING")
+    print("TRAINING MULTITASK SNN")
     print("="*80)
+    
+    print(f"\nTraining configuration:")
+    print(f"  Epochs: {NUM_EPOCHS}")
+    print(f"  Batch size: {BATCH_SIZE}")
+    print(f"  Learning rate: {LEARNING_RATE}")
+    print(f"  Regression weight: {REG_WEIGHT}")
+    
+    classification_criterion = nn.CrossEntropyLoss()
+    regression_criterion = nn.MSELoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=LEARNING_RATE)
     
     history = {
         'total_loss': [],
         'class_loss': [],
         'reg_loss': [],
-        'scaled_class_loss': [],
-        'scaled_reg_loss': [],
-        'class_scale': [],
-        'reg_scale': [],
-        'eval_accuracy': [],
-        'eval_r2': []
+        'r2_score': []
     }
     
-    best_combined_metric = 0
-    best_epoch = 0
-    patience = 15
-    patience_counter = 0
-    num_warmup_epochs = 10
+    print("\nStarting training...")
+    print("-" * 80)
     
     for epoch in range(NUM_EPOCHS):
         # Learning rate warmup
@@ -803,59 +1160,16 @@ def main(selected_arch_name='improved_shared_64_32_class_16_reg_16'):
         history['class_scale'].append(train_metrics['class_scale'])
         history['reg_scale'].append(train_metrics['reg_scale'])
         
-        # Evaluate periodically
-        if (epoch + 1) % EVAL_EVERY == 0:
-            class_results = evaluate_classification(model, wine_test_loader, device)
-            reg_results = evaluate_regression(model, ethanol_test_loader, device)
-            
-            history['eval_accuracy'].append(class_results['accuracy'])
-            history['eval_r2'].append(reg_results['r2'])
-            
-            # Calculate combined metric for model selection
-            combined_metric = (class_results['accuracy'] + reg_results['r2']) / 2
-            
-            if combined_metric > best_combined_metric:
-                best_combined_metric = combined_metric
-                best_epoch = epoch
-                patience_counter = 0
-                
-                # Save best model
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'combined_metric': combined_metric,
-                    'class_accuracy': class_results['accuracy'],
-                    'reg_r2': reg_results['r2']
-                }, os.path.join(save_dir, 'best_model.pth'))
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f'\nEarly stopping triggered after {epoch} epochs')
-                    print(f'Best combined metric: {best_combined_metric:.4f} at epoch {best_epoch}')
-                    break
-            
-            # Combined metric (you can adjust weights)
-            combined_metric = 0.5 * class_results['accuracy'] + 0.5 * max(0, reg_results['r2'])
-            
-            if combined_metric > best_combined_metric:
-                best_combined_metric = combined_metric
-                best_epoch = epoch + 1
-            
-            print(f"\nEpoch [{epoch+1}/{NUM_EPOCHS}]")
-            print(f"  Total Loss:     {train_metrics['total_loss']:.4f}")
-            print(f"  Class Loss:     {train_metrics['class_loss']:.4f} (scale: {train_metrics['class_scale']:.3f})")
-            print(f"  Reg Loss:       {train_metrics['reg_loss']:.4f} (scale: {train_metrics['reg_scale']:.3f})")
-            print(f"  Accuracy:       {class_results['accuracy']:.4f}")
-            print(f"  R²:             {reg_results['r2']:.4f}")
-            print(f"  Combined:       {combined_metric:.4f} (best: {best_combined_metric:.4f} @ epoch {best_epoch})")
+        # Calculate R² score on validation set every epoch
+        reg_results_val = evaluate_regression(model, ethanol_test_loader, device)
+        history['r2_score'].append(reg_results_val['r2'])
         
-        elif (epoch + 1) % 10 == 0:
-            print(f"Epoch [{epoch+1}/{NUM_EPOCHS}] | Loss: {train_metrics['total_loss']:.4f} | "
-                  f"Class: {train_metrics['class_loss']:.4f} | Reg: {train_metrics['reg_loss']:.4f}")
-        
-        # Update learning rate
-        scheduler.step(train_metrics['total_loss'])
+        if (epoch + 1) % 10 == 0 or epoch == 0:
+            print(f"Epoch [{epoch+1:3d}/{NUM_EPOCHS}] | "
+                  f"Total: {avg_loss:.4f} | "
+                  f"Class: {avg_class_loss:.4f} | "
+                  f"Reg: {avg_reg_loss:.4f} | "
+                  f"R²: {reg_results_val['r2']:.4f}")
     
     print("\n✓ Training completed!")
     
@@ -905,28 +1219,55 @@ def main(selected_arch_name='improved_shared_64_32_class_16_reg_16'):
     print("FINAL EVALUATION")
     print("="*80)
     
+    # Classification
+    print("\n--- WINE CLASSIFICATION RESULTS ---")
     class_results = evaluate_classification(model, wine_test_loader, device)
+    print(f"Accuracy:  {class_results['accuracy']:.4f}")
+    print(f"Precision: {class_results['precision']:.4f}")
+    print(f"Recall:    {class_results['recall']:.4f}")
+    print(f"F1-Score:  {class_results['f1']:.4f}")
+    
+    # Regression
+    print("\n--- ETHANOL CONCENTRATION REGRESSION RESULTS ---")
     reg_results = evaluate_regression(model, ethanol_test_loader, device)
     
-    print("\n--- WINE CLASSIFICATION ---")
-    print(f"  Accuracy:  {class_results['accuracy']:.4f}")
-    print(f"  Precision: {class_results['precision']:.4f}")
-    print(f"  Recall:    {class_results['recall']:.4f}")
-    print(f"  F1-Score:  {class_results['f1']:.4f}")
+    # Denormalize for display
+    reg_results_denorm = reg_results.copy()
+    reg_results_denorm['predictions'] = ethanol_scaler_y.inverse_transform(
+        reg_results['predictions'].reshape(-1, 1)).flatten()
+    reg_results_denorm['targets'] = ethanol_scaler_y.inverse_transform(
+        reg_results['targets'].reshape(-1, 1)).flatten()
     
-    print("\n--- ETHANOL REGRESSION ---")
-    print(f"  RMSE: {reg_results['rmse']:.4f}")
-    print(f"  MAE:  {reg_results['mae']:.4f}")
-    print(f"  R²:   {reg_results['r2']:.4f}")
+    rmse_denorm = np.sqrt(mean_squared_error(
+        reg_results_denorm['targets'], reg_results_denorm['predictions']))
+    mae_denorm = mean_absolute_error(
+        reg_results_denorm['targets'], reg_results_denorm['predictions'])
+    r2_denorm = r2_score(
+        reg_results_denorm['targets'], reg_results_denorm['predictions'])
+    
+    print(f"RMSE: {rmse_denorm:.4f}%")
+    print(f"MAE:  {mae_denorm:.4f}%")
+    print(f"R²:   {r2_denorm:.4f}")
     
     # ========================================================================
     # SAVE MODEL
     # ========================================================================
+    print("\n" + "="*80)
+    print("SAVING MODEL")
+    print("="*80)
+    
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    model_name = (f"{selected_arch_name}_improved_"
-                  f"acc-{class_results['accuracy']:.3f}_"
-                  f"r2-{reg_results['r2']:.3f}_"
+    
+    model_name = (f"{selected_arch_name}_timeseries_FIXED_"
+                  f"seq{SEQUENCE_LENGTH}_"
+                  f"enc{ENCODING_TYPE}_"
+                  f"beta{BETA}_"
+                  f"epochs{NUM_EPOCHS}_"
+                  f"lr{LEARNING_RATE}_"
+                  f"bs{BATCH_SIZE}_"
+                  f"rw{REG_WEIGHT}_"
                   f"{timestamp}.pth")
+    
     model_path = os.path.join(models_dir, model_name)
     
     torch.save({
@@ -934,9 +1275,12 @@ def main(selected_arch_name='improved_shared_64_32_class_16_reg_16'):
         'architecture_name': selected_arch_name,
         'architecture': {
             'input_size': input_size,
-            'num_classes': 3,
-            'beta': BETA,
-            'dropout_rate': DROPOUT_RATE
+            'encoder_hidden': ENCODER_HIDDEN,
+            'shared_hidden': SHARED_HIDDEN,
+            'classification_hidden': CLASS_HIDDEN,
+            'regression_hidden': REG_HIDDEN,
+            'num_classes': NUM_CLASSES,
+            'beta': BETA
         },
         'hyperparameters': {
             'learning_rate': BASE_LEARNING_RATE,
@@ -950,22 +1294,23 @@ def main(selected_arch_name='improved_shared_64_32_class_16_reg_16'):
         },
         'results': {
             'classification': class_results,
-            'regression': reg_results,
-            'best_combined_metric': best_combined_metric,
-            'best_epoch': best_epoch
+            'regression': {
+                'mse': reg_results['mse'],
+                'rmse': rmse_denorm,
+                'mae': mae_denorm,
+                'r2': r2_denorm,
+                'predictions': reg_results_denorm['predictions'],
+                'targets': reg_results_denorm['targets']
+            }
         },
         'history': history,
         'scalers': {
-            'wine_scaler': preprocessed_data['wine']['scaler_X'],
-            'ethanol_scaler': preprocessed_data['ethanol']['scaler_X'],
+            'wine_scaler': wine_scaler,
+            'ethanol_scaler': ethanol_scaler,
             'ethanol_scaler_y': ethanol_scaler_y
         },
         'label_encoder': wine_label_encoder,
-        'feature_names': splits['wine']['feature_names'],
-        'loss_scaler_final': {
-            'class_scale': loss_scaler.class_loss_scale,
-            'reg_scale': loss_scaler.reg_loss_scale
-        }
+        'sensor_cols': SENSOR_COLS
     }, model_path)
     
     print(f"\n✓ Model saved to: {model_path}")
@@ -977,79 +1322,33 @@ def main(selected_arch_name='improved_shared_64_32_class_16_reg_16'):
     print("GENERATING VISUALIZATIONS")
     print("="*80)
     
-    # Save history json and generate static plots (useful for HPO and CI)
-    json_path = os.path.join(models_dir, 'history.json')
-    try:
-        save_history_json(history, json_path)
-        saved_plot_files = plot_history(history, models_dir)
-        print(f"\nSaved training history JSON to: {json_path}")
-        if saved_plot_files:
-            print("Saved plots:")
-            for p in saved_plot_files:
-                print(f"  - {p}")
-    except Exception as e:
-        print(f"Warning: failed to save history or plots: {e}")
-
-    # Training history with loss scaling (interactive / inline)
-    print("\n1. Training history with adaptive loss scaling...")
-    plot_training_history_improved(history)
+    # Training history (now includes R²)
+    plot_training_history(history)
     
     # Classification results
-    print("2. Classification results...")
     class_names = wine_label_encoder.classes_
     plot_classification_results(class_results, class_names)
     
     # Regression results
-    print("3. Regression results...")
-    plot_regression_results(reg_results)
-    
-    # Shared layer activity visualization
-    print("4. Shared layer activity...")
-    wine_sample = X_test_wine_spikes[0:1, :, :].permute(1, 0, 2)
-    ethanol_sample = X_test_ethanol_spikes[0:1, :, :].permute(1, 0, 2)
-    plot_shared_layer_activity(model, wine_sample, ethanol_sample, device)
+    plot_regression_results(reg_results, ethanol_scaler_y)
     
     # ========================================================================
     # FINAL SUMMARY
     # ========================================================================
     print("\n" + "="*80)
-    print("TRAINING SUMMARY")
+    print("MULTITASK TIME SERIES SNN - FINAL SUMMARY (FIXED)")
     print("="*80)
-    print(f"\nArchitecture: {selected_arch_name}")
-    print(f"\nImprovements Applied:")
-    print(f"  ✓ Adaptive loss scaling (balanced {len(history['class_loss'])} epochs)")
-    print(f"  ✓ Combined gradient updates (no alternating)")
-    print(f"  ✓ Gradient clipping (max norm: {MAX_GRAD_NORM})")
-    print(f"  ✓ Larger shared capacity (64→32 neurons)")
-    print(f"  ✓ Learning rate scheduling")
-    print(f"  ✓ Dropout regularization ({DROPOUT_RATE})")
     
-    print(f"\nTime Series Config:")
-    print(f"  - Sequence length: {SEQUENCE_LENGTH}")
-    print(f"  - Downsample factor: {DOWNSAMPLE_FACTOR}")
-    print(f"  - Encoding type: {ENCODING_TYPE}")
-    print(f"  - Input features: {input_size}")
-    
-    print(f"\nFinal Performance:")
-    print(f"  Wine Classification:")
-    print(f"    - Accuracy: {class_results['accuracy']:.4f}")
-    print(f"    - F1-Score: {class_results['f1']:.4f}")
-    print(f"  Ethanol Regression:")
-    print(f"    - RMSE: {reg_results['rmse']:.4f}")
-    print(f"    - R²:   {reg_results['r2']:.4f}")
-    print(f"  Combined Metric: {0.5 * class_results['accuracy'] + 0.5 * max(0, reg_results['r2']):.4f}")
-    print(f"  Best Epoch: {best_epoch}")
-    
-    print(f"\nModel saved to: {model_path}")
+    print(f"""
+✓ TRAINING COMPLETED SUCCESSFULLY!
+
+🔧 FIXES APPLIED:
     print("\n" + "="*80)
-    print("ALL DONE! 🎉")
+    print("ALL DONE! ✅")
     print("="*80)
-    
-    return model, history, class_results, reg_results
 
 
 if __name__ == "__main__":
-    # Force use of improved architecture
     if len(sys.argv) > 1:
         main(selected_arch_name=sys.argv[1])
     else:
