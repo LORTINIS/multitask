@@ -27,6 +27,47 @@ from architectures import (
     load_architecture,
     print_available_architectures
 )
+# Results I/O and plotting utilities
+
+
+class AdaptiveLossScaler:
+    """
+    Dynamically scale losses to keep them in similar magnitude ranges.
+    This prevents one task from dominating training.
+    """
+    def __init__(self, alpha=0.9):
+        self.alpha = alpha  # EMA factor
+        self.class_loss_scale = 1.0
+        self.reg_loss_scale = 1.0
+        self.class_loss_history = []
+        self.reg_loss_history = []
+    
+    def update(self, class_loss, reg_loss):
+        """Update loss scales based on recent history."""
+        self.class_loss_history.append(class_loss)
+        self.reg_loss_history.append(reg_loss)
+        
+        # Keep only recent history
+        if len(self.class_loss_history) > 100:
+            self.class_loss_history = self.class_loss_history[-100:]
+            self.reg_loss_history = self.reg_loss_history[-100:]
+        
+        # Calculate average magnitudes
+        if len(self.class_loss_history) >= 10:
+            avg_class = np.mean(self.class_loss_history[-10:])
+            avg_reg = np.mean(self.reg_loss_history[-10:])
+            
+            # Update scales with EMA
+            if avg_class > 0:
+                self.class_loss_scale = self.alpha * self.class_loss_scale + (1 - self.alpha) * (1.0 / avg_class)
+            if avg_reg > 0:
+                self.reg_loss_scale = self.alpha * self.reg_loss_scale + (1 - self.alpha) * (1.0 / avg_reg)
+    
+    def scale_losses(self, class_loss, reg_loss, reg_weight=0.5):
+        """Apply scaling to losses."""
+        scaled_class = class_loss * self.class_loss_scale * (1 - reg_weight)
+        scaled_reg = reg_loss * self.reg_loss_scale * reg_weight
+        return scaled_class, scaled_reg
 
 # ============================================================================
 # CONFIGURATION
@@ -378,6 +419,8 @@ def train_multitask_epoch(model, wine_loader, ethanol_loader, device,
     total_loss = 0
     total_class_loss = 0
     total_reg_loss = 0
+    total_scaled_class_loss = 0
+    total_scaled_reg_loss = 0
     num_batches = 0
     
     wine_iter = iter(wine_loader)
@@ -386,8 +429,8 @@ def train_multitask_epoch(model, wine_loader, ethanol_loader, device,
     wine_exhausted = False
     ethanol_exhausted = False
     
-    while not (wine_exhausted and ethanol_exhausted):
-        batch_loss = 0
+    for _ in range(max_batches):
+        optimizer.zero_grad()
         batch_class_loss = 0
         batch_reg_loss = 0
         tasks_processed = 0
@@ -445,16 +488,114 @@ def train_multitask_epoch(model, wine_loader, ethanol_loader, device,
             batch_loss.backward()
             optimizer.step()
             
-            total_loss += batch_loss.item()
-            total_class_loss += batch_class_loss
-            total_reg_loss += batch_reg_loss
-            num_batches += 1
+            # Permute to [time_steps, batch, features]
+            wine_spikes = wine_spikes.permute(1, 0, 2)
+            
+            # Forward pass
+            output = model(wine_spikes)
+            
+            # Classification loss
+            class_mem_rec = output['classification']['mem_rec']
+            class_loss = classification_criterion(
+                class_mem_rec.sum(0), wine_labels.long()
+            )
+            batch_class_loss = class_loss.item()
+            
+        except StopIteration:
+            class_loss = torch.tensor(0.0, device=device)
+            batch_class_loss = 0
+        
+        # ====================================================================
+        # ETHANOL REGRESSION TASK
+        # ====================================================================
+        try:
+            ethanol_spikes, ethanol_conc = next(ethanol_iter)
+            ethanol_spikes = ethanol_spikes.to(device)
+            ethanol_conc = ethanol_conc.to(device)
+            
+            # Permute to [time_steps, batch, features]
+            ethanol_spikes = ethanol_spikes.permute(1, 0, 2)
+            
+            # Forward pass
+            output = model(ethanol_spikes)
+            
+            # Regression loss
+            reg_mem_rec = output['regression']['mem_rec']
+            predicted_conc = reg_mem_rec.sum(0)
+            reg_loss = regression_criterion(predicted_conc.squeeze(), ethanol_conc)
+            batch_reg_loss = reg_loss.item()
+            
+        except StopIteration:
+            reg_loss = torch.tensor(0.0, device=device)
+            batch_reg_loss = 0
+        
+        # ====================================================================
+        # IMPROVED ADAPTIVE LOSS SCALING WITH WARMUP
+        # ====================================================================
+        # Update scaler with current losses
+        loss_scaler.update(batch_class_loss, batch_reg_loss)
+        
+        # Scale losses to similar magnitudes with warmup consideration
+        if warmup:
+            # During warmup phase, gradually increase loss scaling
+            warmup_factor = 0.5  # Start with gentler scaling
+            scaled_class = class_loss * warmup_factor
+            scaled_reg = reg_loss * warmup_factor
+        else:
+            # Normal scaling after warmup
+            scaled_class, scaled_reg = loss_scaler.scale_losses(
+                class_loss, reg_loss, reg_weight
+            )
+        
+        # Add L2 regularization if needed during non-warmup phase
+        if not warmup:
+            l2_lambda = 1e-5
+            l2_reg = torch.tensor(0., device=device)
+            for param in model.parameters():
+                l2_reg += torch.norm(param)
+            l2_reg *= l2_lambda
+        else:
+            l2_reg = torch.tensor(0., device=device)
+        
+        # Combined loss with regularization
+        batch_loss = scaled_class + scaled_reg + l2_reg
+        
+        # ====================================================================
+        # BACKPROPAGATION WITH GRADIENT CLIPPING
+        # ====================================================================
+        batch_loss.backward()
+        
+        # Clip gradients to prevent explosion
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=max_grad_norm)
+        
+        optimizer.step()
+        
+        # ====================================================================
+        # LOGGING
+        # ====================================================================
+        total_loss += batch_loss.item()
+        total_class_loss += batch_class_loss
+        total_reg_loss += batch_reg_loss
+        total_scaled_class_loss += scaled_class.item()
+        total_scaled_reg_loss += scaled_reg.item()
+        num_batches += 1
     
+    # Calculate averages
     avg_loss = total_loss / num_batches if num_batches > 0 else 0
     avg_class_loss = total_class_loss / num_batches if num_batches > 0 else 0
     avg_reg_loss = total_reg_loss / num_batches if num_batches > 0 else 0
+    avg_scaled_class = total_scaled_class_loss / num_batches if num_batches > 0 else 0
+    avg_scaled_reg = total_scaled_reg_loss / num_batches if num_batches > 0 else 0
     
-    return avg_loss, avg_class_loss, avg_reg_loss
+    return {
+        'total_loss': avg_loss,
+        'class_loss': avg_class_loss,
+        'reg_loss': avg_reg_loss,
+        'scaled_class_loss': avg_scaled_class,
+        'scaled_reg_loss': avg_scaled_reg,
+        'class_scale': loss_scaler.class_loss_scale,
+        'reg_scale': loss_scaler.reg_loss_scale
+    }
 
 
 def evaluate_classification(model, data_loader, device):
@@ -469,7 +610,6 @@ def evaluate_classification(model, data_loader, device):
             labels = labels.to(device)
             
             spikes = spikes.permute(1, 0, 2)
-            
             output = model(spikes)
             mem_rec = output['classification']['mem_rec']
             
@@ -511,7 +651,6 @@ def evaluate_regression(model, data_loader, device):
             targets = targets.to(device)
             
             spikes = spikes.permute(1, 0, 2)
-            
             output = model(spikes)
             mem_rec = output['regression']['mem_rec']
             
@@ -997,15 +1136,29 @@ def main(selected_arch_name=None):
     print("-" * 80)
     
     for epoch in range(NUM_EPOCHS):
-        avg_loss, avg_class_loss, avg_reg_loss = train_multitask_epoch(
+        # Learning rate warmup
+        if epoch < num_warmup_epochs:
+            lr = BASE_LEARNING_RATE * ((epoch + 1) / num_warmup_epochs)
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+        
+        # Train
+        train_metrics = train_multitask_epoch_improved(
             model, wine_train_loader, ethanol_train_loader, device,
             classification_criterion, regression_criterion,
-            optimizer, reg_weight=REG_WEIGHT
+            optimizer, loss_scaler, reg_weight=REG_WEIGHT,
+            max_grad_norm=MAX_GRAD_NORM,
+            warmup=(epoch < num_warmup_epochs)
         )
         
-        history['total_loss'].append(avg_loss)
-        history['class_loss'].append(avg_class_loss)
-        history['reg_loss'].append(avg_reg_loss)
+        # Log metrics
+        history['total_loss'].append(train_metrics['total_loss'])
+        history['class_loss'].append(train_metrics['class_loss'])
+        history['reg_loss'].append(train_metrics['reg_loss'])
+        history['scaled_class_loss'].append(train_metrics['scaled_class_loss'])
+        history['scaled_reg_loss'].append(train_metrics['scaled_reg_loss'])
+        history['class_scale'].append(train_metrics['class_scale'])
+        history['reg_scale'].append(train_metrics['reg_scale'])
         
         # Calculate R² score on validation set every epoch
         reg_results_val = evaluate_regression(model, ethanol_test_loader, device)
@@ -1021,10 +1174,49 @@ def main(selected_arch_name=None):
     print("\n✓ Training completed!")
     
     # ========================================================================
-    # EVALUATION
+    # LOSS MAGNITUDE DIAGNOSTIC
     # ========================================================================
     print("\n" + "="*80)
-    print("EVALUATION")
+    print("LOSS MAGNITUDE DIAGNOSTIC")
+    print("="*80)
+    
+    with torch.no_grad():
+        sample_wine = next(iter(wine_test_loader))
+        sample_eth = next(iter(ethanol_test_loader))
+        
+        wine_out = model(sample_wine[0].to(device).permute(1, 0, 2))
+        eth_out = model(sample_eth[0].to(device).permute(1, 0, 2))
+        
+        final_class_loss = classification_criterion(
+            wine_out['classification']['mem_rec'].sum(0), 
+            sample_wine[1].to(device).long()
+        )
+        final_reg_loss = regression_criterion(
+            eth_out['regression']['mem_rec'].sum(0).squeeze(),
+            sample_eth[1].to(device)
+        )
+        
+        print(f"\nFinal raw loss magnitudes:")
+        print(f"  Classification: {final_class_loss:.4f}")
+        print(f"  Regression:     {final_reg_loss:.4f}")
+        print(f"  Ratio (C/R):    {final_class_loss/final_reg_loss:.4f}")
+        print(f"\nFinal loss scales:")
+        print(f"  Class scale:    {loss_scaler.class_loss_scale:.4f}")
+        print(f"  Reg scale:      {loss_scaler.reg_loss_scale:.4f}")
+        print(f"\nLoss balance assessment:")
+        ratio = final_class_loss / final_reg_loss
+        if 0.5 <= ratio <= 2.0:
+            print(f"  ✓ Losses are well balanced (ratio: {ratio:.2f})")
+        elif ratio > 2.0:
+            print(f"  ⚠ Classification loss dominates (ratio: {ratio:.2f})")
+        else:
+            print(f"  ⚠ Regression loss dominates (ratio: {ratio:.2f})")
+    
+    # ========================================================================
+    # FINAL EVALUATION
+    # ========================================================================
+    print("\n" + "="*80)
+    print("FINAL EVALUATION")
     print("="*80)
     
     # Classification
@@ -1091,10 +1283,11 @@ def main(selected_arch_name=None):
             'beta': BETA
         },
         'hyperparameters': {
-            'learning_rate': LEARNING_RATE,
+            'learning_rate': BASE_LEARNING_RATE,
             'num_epochs': NUM_EPOCHS,
             'batch_size': BATCH_SIZE,
             'reg_weight': REG_WEIGHT,
+            'max_grad_norm': MAX_GRAD_NORM,
             'sequence_length': SEQUENCE_LENGTH,
             'downsample_factor': DOWNSAMPLE_FACTOR,
             'encoding_type': ENCODING_TYPE
@@ -1150,76 +1343,6 @@ def main(selected_arch_name=None):
 ✓ TRAINING COMPLETED SUCCESSFULLY!
 
 🔧 FIXES APPLIED:
-=================
-✓ Train-test split BEFORE normalization (no data leakage)
-✓ Scaler fitted on training data ONLY
-✓ Test data transformed with training scaler
-✓ Loss computation uses last timestep (not mean)
-✓ R² score tracked during training
-✓ Proper temporal SNN processing
-
-APPROACH: TIME SERIES DIRECT PROCESSING
-========================================
-- Full temporal sequences ({SEQUENCE_LENGTH} timesteps)
-- Direct spike encoding (not aggregated statistics)
-- Only MQ sensor data (6 features, no temperature/humidity)
-- Preserves temporal dynamics throughout training
-
-ARCHITECTURE: ENCODER + SHARED + TASK-SPECIFIC
-==============================================
-- Input: {input_size} features per timestep (MQ sensors only)
-- Common Encoder: {ENCODER_HIDDEN} neurons (shared encoding)
-- Shared Layer: {SHARED_HIDDEN} neurons ({ENCODER_HIDDEN} → {SHARED_HIDDEN})
-- Classification Branch: {SHARED_HIDDEN} → {CLASS_HIDDEN} → {NUM_CLASSES}
-- Regression Branch: {SHARED_HIDDEN} → {REG_HIDDEN} → 1
-- Total timesteps: {SEQUENCE_LENGTH}
-- Encoding: {ENCODING_TYPE}
-
-CLASSIFICATION RESULTS (Wine Quality):
-======================================
-- Accuracy:  {class_results['accuracy']:.4f}
-- Precision: {class_results['precision']:.4f}
-- Recall:    {class_results['recall']:.4f}
-- F1-Score:  {class_results['f1']:.4f}
-
-REGRESSION RESULTS (Ethanol Concentration):
-==========================================
-- RMSE: {rmse_denorm:.4f}%
-- MAE:  {mae_denorm:.4f}%
-- R²:   {r2_denorm:.4f}
-- Final R² (last epoch): {history['r2_score'][-1]:.4f}
-
-DATASET:
-========
-- Wine samples: {len(wine_sequences)}
-- Ethanol samples: {len(ethanol_sequences)}
-- Train split: 80%
-- Test split: 20%
-- Features: {len(SENSOR_COLS)} MQ sensors
-- Sequence length: {SEQUENCE_LENGTH} timesteps
-- Downsample factor: {DOWNSAMPLE_FACTOR}
-
-TRAINING:
-=========
-- Epochs: {NUM_EPOCHS}
-- Batch size: {BATCH_SIZE}
-- Learning rate: {LEARNING_RATE}
-- Regression weight: {REG_WEIGHT}
-- Total parameters: {total_params:,}
-
-KEY ADVANTAGES:
-===============
-✓ No data leakage (proper split order)
-✓ Temporal dynamics preserved
-✓ Biological sensing patterns maintained
-✓ SNN temporal processing fully utilized
-✓ Multitask learning with shared representations
-✓ Direct spike encoding from time series
-✓ R² score monitoring throughout training
-
-Model saved at: {model_path}
-""")
-    
     print("\n" + "="*80)
     print("ALL DONE! ✅")
     print("="*80)
@@ -1229,4 +1352,4 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         main(selected_arch_name=sys.argv[1])
     else:
-        main()
+        main(selected_arch_name='improved_shared_64_32_class_16_reg_16')
