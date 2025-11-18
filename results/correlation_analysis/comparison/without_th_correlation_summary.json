@@ -1,0 +1,92 @@
+{
+  "dataset": "without_th",
+  "timestamp": "2025-11-18T15:58:15.247132",
+  "n_samples": 235,
+  "n_features": 6,
+  "n_classes": 3,
+  "feature_names": [
+    "MQ-3_R1 (kOhm)",
+    "MQ-4_R1 (kOhm)",
+    "MQ-6_R1 (kOhm)",
+    "MQ-3_R2 (kOhm)",
+    "MQ-4_R2 (kOhm)",
+    "MQ-6_R2 (kOhm)"
+  ],
+  "class_names": [
+    "AQ",
+    "HQ",
+    "LQ"
+  ],
+  "high_pearson_correlations": [
+    {
+      "feature_1": "MQ-3_R1 (kOhm)",
+      "feature_2": "MQ-3_R2 (kOhm)",
+      "correlation": 0.9004238357861439
+    },
+    {
+      "feature_1": "MQ-6_R1 (kOhm)",
+      "feature_2": "MQ-4_R2 (kOhm)",
+      "correlation": 0.8835959655903838
+    },
+    {
+      "feature_1": "MQ-6_R1 (kOhm)",
+      "feature_2": "MQ-6_R2 (kOhm)",
+      "correlation": 0.7222117916001615
+    },
+    {
+      "feature_1": "MQ-4_R2 (kOhm)",
+      "feature_2": "MQ-6_R2 (kOhm)",
+      "correlation": 0.749746713897028
+    }
+  ],
+  "high_feature_label_correlations": [
+    {
+      "feature": "MQ-4_R1 (kOhm)",
+      "class": "AQ",
+      "correlation": 0.3536363754946273
+    },
+    {
+      "feature": "MQ-4_R1 (kOhm)",
+      "class": "HQ",
+      "correlation": 0.6145006231678934
+    },
+    {
+      "feature": "MQ-4_R1 (kOhm)",
+      "class": "LQ",
+      "correlation": -0.7961676972887316
+    },
+    {
+      "feature": "MQ-6_R1 (kOhm)",
+      "class": "HQ",
+      "correlation": 0.36452542016968714
+    },
+    {
+      "feature": "MQ-6_R1 (kOhm)",
+      "class": "LQ",
+      "correlation": -0.46736173878092496
+    },
+    {
+      "feature": "MQ-4_R2 (kOhm)",
+      "class": "LQ",
+      "correlation": -0.4342973854467852
+    },
+    {
+      "feature": "MQ-6_R2 (kOhm)",
+      "class": "AQ",
+      "correlation": 0.46870411707393406
+    },
+    {
+      "feature": "MQ-6_R2 (kOhm)",
+      "class": "LQ",
+      "correlation": -0.3199305230330664
+    }
+  ],
+  "mutual_information": {
+    "MQ-3_R1 (kOhm)": 0.08459174519201351,
+    "MQ-4_R1 (kOhm)": 0.5137649853272352,
+    "MQ-6_R1 (kOhm)": 0.3545855161871605,
+    "MQ-3_R2 (kOhm)": 0.06973738353655623,
+    "MQ-4_R2 (kOhm)": 0.29761708802047915,
+    "MQ-6_R2 (kOhm)": 0.10794479285814251
+  }
+}
