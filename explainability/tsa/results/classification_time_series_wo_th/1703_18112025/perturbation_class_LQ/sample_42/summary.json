@@ -1,0 +1,15 @@
+{
+  "sample_index": 42,
+  "true_class": "LQ",
+  "true_class_idx": 2,
+  "predicted_class": "LQ",
+  "predicted_class_idx": 2,
+  "correct_prediction": true,
+  "membrane_potentials": [
+    -243.22085571289062,
+    -242.8330535888672,
+    -239.34942626953125
+  ],
+  "perturbation_analysis": null,
+  "save_directory": "perturbation_class_LQ\\sample_42"
+}

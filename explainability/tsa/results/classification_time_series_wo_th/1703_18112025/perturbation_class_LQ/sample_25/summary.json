@@ -1,0 +1,72 @@
+{
+  "sample_index": 25,
+  "true_class": "LQ",
+  "true_class_idx": 2,
+  "predicted_class": "LQ",
+  "predicted_class_idx": 2,
+  "correct_prediction": true,
+  "membrane_potentials": [
+    -243.12738037109375,
+    -241.67245483398438,
+    -240.16378784179688
+  ],
+  "perturbation_analysis": {
+    "description": "Analysis of how removing spikes affects model predictions",
+    "baseline": {
+      "predicted_class_idx": 2,
+      "membrane_potentials": {
+        "class_0": -243.12738037109375,
+        "class_1": -241.67245483398438,
+        "class_2": -240.16378784179688
+      },
+      "predicted_class_membrane_potential": -240.16378784179688
+    },
+    "k_values_tested": [
+      1
+    ],
+    "top_k_deletions": {
+      "description": "Removing the k most important spikes (highest TSA attribution)",
+      "results": [
+        {
+          "k": 1,
+          "predicted_class_idx": 2,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -241.91018676757812,
+            "class_1": -242.3211669921875,
+            "class_2": -241.50341796875
+          },
+          "original_class_membrane_potential": -241.50341796875,
+          "membrane_potential_drop": 1.339630126953125,
+          "membrane_potential_drop_percentage": -0.5577985503108319
+        }
+      ]
+    },
+    "random_k_deletions": {
+      "description": "Removing k random spikes for comparison",
+      "results": [
+        {
+          "k": 1,
+          "predicted_class_idx": 2,
+          "predicted_class_changed": false,
+          "membrane_potentials": {
+            "class_0": -242.36956787109375,
+            "class_1": -242.31265258789062,
+            "class_2": -240.8589324951172
+          },
+          "original_class_membrane_potential": -240.8589324951172,
+          "membrane_potential_drop": 0.6951446533203125,
+          "membrane_potential_drop_percentage": -0.2894460732682253
+        }
+      ]
+    },
+    "summary": {
+      "top_k_average_drop": 1.339630126953125,
+      "top_k_max_drop": 1.339630126953125,
+      "random_k_average_drop": 0.6951446533203125,
+      "random_k_max_drop": 0.6951446533203125,
+      "top_k_more_effective": true
+    }
+  },
+  "save_directory": "perturbation_class_LQ\\sample_25"
+}
