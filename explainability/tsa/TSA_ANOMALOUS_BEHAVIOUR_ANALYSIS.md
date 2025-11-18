@@ -4,15 +4,6 @@
 
 This document provides an extensive analysis of why the Temporal Spike Attribution (TSA) method exhibits **anomalous behaviour when temperature and humidity features are included** in the wine quality classification dataset. The core issue is that **removing the most important spikes (highest TSA attribution) results in INCREASED membrane potential instead of the expected decrease**, which is counterintuitive and indicates spurious correlations in the learned representations.
 
-### Key Finding
-When temperature and humidity are included, the model learns spurious shortcuts based on environmental conditions rather than genuine chemical sensor responses. This causes **class-dependent anomalous behaviour**:
-
-- **HQ (High Quality) class**: Removing important spikes **STRENGTHENS** predictions (wrong!)
-- **LQ (Low Quality) class**: Removing important spikes weakens predictions (correct direction, but random equally effective)
-- **AQ (Average Quality) class**: Mixed behaviour - some samples strengthen, others weaken
-
-The **anti-correlation between temperature and MQ-4_R1 sensor (-0.864)** creates paradoxical attribution patterns, especially for HQ wines that require moderate temperatures.
-
 ---
 ## 1. Dataset Correlation Analysis
 
